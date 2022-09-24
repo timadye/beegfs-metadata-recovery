@@ -1,0 +1,194 @@
+#!/usr/bin/env python3
+
+import sys, argparse, re
+from collections import defaultdict
+from pathlib import Path
+
+args = None
+
+
+def parse_args():
+    global args
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-v", "--verbose", action="store_true")
+    parser.add_argument("-q", "--quiet", action="store_true")
+    parser.add_argument("-f", "--list-files", action="store_true")
+    parser.add_argument("-d", "--list-directories", action="store_true")
+    parser.add_argument("-c", "--list-chunks", action="store_true")
+    parser.add_argument("-e", "--empty-directories", action="store_true")
+    parser.add_argument("-t", "--tags", action="store_true")
+    parser.add_argument("-n", "--max-files", type=int)
+    parser.add_argument("-u", "--user", default="")
+    parser.add_argument("dir", nargs="?", default=".")
+    args = parser.parse_args()
+
+
+def err(*fargs, **fkwargs):
+    if args.quiet:
+        return
+    print(*fargs, file=sys.stderr, **fkwargs)
+
+
+def info(*fargs, **fkwargs):
+    if not args.verbose:
+        return
+    print(*fargs, file=sys.stderr, **fkwargs)
+
+
+def lsdirs(index):
+
+    def lsdir(tag, pre, depth=0):
+        subs = tags.get(tag)
+        if subs is None:
+            return [[pre, tag]]
+        if pre != "":
+            pre += "/"
+        if depth > 100:
+            err("directory too deep:", pre)
+            return [[pre + "...", tag]]
+        else:
+            dirs = []
+            for t, f in subs:
+                dirs += lsdir(t, pre + f)
+            return dirs
+
+    tags = defaultdict(list)
+    toptags = {}
+    with open(index, encoding="latin-1") as f:
+        n = 0
+        lines = []
+        joined = ""
+        for l in f:
+            n += 1
+            line = l.rstrip("\n")
+            if line == "" or " " in line:
+                if joined is not None:
+                    err(joined)
+                    joined = None
+                if line != "":
+                    lines.append(line)
+            elif re.match(
+                r"mercury\d+/meta(/buddymir)?/dentries/[0-9A-f]+/[0-9A-f]+/([0-9A-f]+-[0-9A-f]+-[0-9A-f]+|root)/\S+$",
+                line,
+            ):
+                lines.append(f":{n} " + line)
+                if joined is not None:
+                    err(joined)
+                joined = f"{index}:{n}: missing tag: " + line
+            else:
+                if joined is None:
+                    joined = f"{index}:{n}: lines joined: " + lines[-1]
+                joined += f"\n    {line}"
+                lines[-1] += " " + line
+        if joined is not None:
+            err(joined)
+
+        for line in lines:
+            tag, ent = line.split(" ", 1)
+            stag, sdir = ent.split("/")[-2:]
+            tags[stag].append([tag, sdir])
+            if stag == "root" and (args.user == "" or sdir == args.user):
+                toptags[tag] = sdir
+    dirs = []
+    for toptag, user in toptags.items():
+        dirs += lsdir(toptag, user)
+    return dirs
+
+
+def lsfiles(index, dirs):
+    fnames = defaultdict(list)
+    chunks = defaultdict(list)
+    max_files = args.max_files
+    if max_files is None:
+        max_files = -1
+    with open(index, encoding="latin-1") as f:
+        n = 0
+        for l in f:
+            n += 1
+            if max_files >= 0 and n > max_files:
+                break
+            w = l.rstrip("\n").split(" ", 1)
+            if len(w) != 2:
+                err(f"{index}:{n}: bad format:", line)
+                continue
+            tag, ent = w
+            ftag, fname = ent.split("/")[-2:]
+            if ftag == "#fSiDs#":
+                chunks[tag].append(fname)
+            else:
+                fnames[ftag].append([tag, fname])
+
+    files = []
+    n = 0
+    for d, t in dirs:
+        n += 1
+        tf = fnames.get(t)
+        if tf is None:
+            if args.empty_directories:
+                info("empty dir:", d)
+                files.append([d + "/", [t]])
+        else:
+            for tag, fname in tf:
+                files.append([d + "/" + fname, chunks.get(tag, [])])
+
+    return files
+
+
+def lschunks(index, files):
+    fchunks = defaultdict(list)
+    with open(index, encoding="latin-1") as f:
+        n = 0
+        for l in f:
+            n += 1
+            line = l.rstrip("\n")
+            fchunks[line.split("/")[-1]].append(line)
+
+    chunks = []
+    for fname, tags in files:
+        if fname[-1] == "/":
+            continue
+        cc = []
+        for t in tags:
+            c = fchunks.get(t)
+            if c is None:
+                err(f"{fname} chunk {t} not found")
+            elif len(c) > 1:
+                info(f"{fname} chunk {t} multiple copies:", " ".join(c))
+            else:
+                cc += c
+        chunks.append([fname, tags, cc])
+
+    return chunks
+
+
+def process():
+    parse_args()
+    idir = Path(args.dir)
+    dirs = lsdirs(idir / "dir-metadata-index.txt")
+
+    if args.list_directories:
+        for d, t in dirs:
+            if args.tags:
+                print(d + "\t" + t)
+            else:
+                print(d)
+
+    if args.list_files:
+        files = lsfiles(idir / "file-metadata-index.txt", dirs)
+        for f, t in files:
+            if args.tags:
+                print(f + "\t" + " ".join(t))
+            else:
+                print(f)
+
+    if args.list_chunks:
+        files = lsfiles(idir / "file-metadata-index.txt", dirs)
+        chunks = lschunks(idir / "storage-chunk-index.txt", files)
+        for f, t, c in chunks:
+            if args.tags:
+                print(f + "\t" + " ".join(t) + "\t" + " ".join([str(idir / cc) for cc in c]))
+            else:
+                print(f + "\t" + " ".join([str(idir / cc) for cc in c]))
+
+
+exit(process())
