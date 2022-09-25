@@ -61,24 +61,26 @@ def lsdirs(index):
         for l in f:
             n += 1
             line = l.rstrip("\n")
-            if line == "" or " " in line or "/" in line:
+            if line == "" or " " in line or "/" in line or n<=1:
                 if joined is not None:
                     info(joined)
                     joined = None
                 if line != "":
-                    lines.append(line)
+                    lines.append([line,n])
             else:
+                last = lines[-1]
                 if joined is None:
-                    joined = f"{index}:{n}: lines joined: " + lines[-1]
+                    lastl,lastn = last
+                    joined = f"{index}:{lastn}: lines joined: {lastl}"
                 joined += f"\\n{line}"
-                lines[-1] += "\n" + line
+                last[0] += "\n" + line
         if joined is not None:
             info(joined)
 
-        for line in lines:
+        for line,n in lines:
             flds = line.split(" ", 1)
             if not (len(flds) == 2 and "/" not in flds[0] and "/" in flds[-1]):
-                err(f"{index}: bad format:",re.sub(r"\n",r"\\n",line))
+                err(f"{index}:{n}: bad format:",re.sub(r"\n",r"\\n",line))
                 continue
             tag, ent = flds
             stag, sdir = ent.split("/")[-2:]
