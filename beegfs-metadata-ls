@@ -40,12 +40,12 @@ def lsdirs(index):
     def lsdir(tag, pre, depth=0):
         subs = tags.get(tag)
         if subs is None:
-            return [[pre, tag]]
+            return [(pre, tag)]
         if pre != "":
             pre += "/"
         if depth > 100:
             err("directory too deep:", pre)
-            return [[pre + "...", tag]]
+            return [(pre + "...", tag)]
         else:
             dirs = []
             for t, f in subs:
@@ -92,7 +92,9 @@ def lsdirs(index):
     dirs = []
     for toptag, user in toptags.items():
         dirs += lsdir(toptag, user)
-    return dirs
+
+    # return list(set(dirs))   # nt so good - reorders the list
+    return {dt:0 for dt in dirs}.keys()    # unique tag/dir
 
 
 def lsfiles(index, dirs):
@@ -103,7 +105,7 @@ def lsfiles(index, dirs):
         dtag[dt[1]].append(dt)
     for t, dt in dtag.items():
         if len(dt) != 1:
-            err("tag {t} has multiple dirs:", " ".join([d[0] for d in dt]))
+            err(f"multiple dirs for tag {t}:", " ".join([d[0] for d in dt]))
 
     chunks = defaultdict(list)
     max_files = args.max_files
@@ -151,8 +153,8 @@ def lschunks(index, files):
     for t, ffc in ctags.items():
         if len(ffc) > 1 or len(ffc[0][0][0]) > 1:
             err(
-                "chunk {t} used in multiple files:",
-                " ".join([d + "/" + ffc[0][1] for ffc in ffcl for d, _ in ffc[0][0]]),
+                f"chunk {t} used in multiple files:",
+                " ".join([d + "/" + ffcc[0][1] for ffcc in ffc for d, _ in ffcc[0][0]]),
             )
 
     chunks = []
@@ -178,9 +180,9 @@ def lschunks(index, files):
             for d, t in dt:
                 for ic, c in enumerate(cc):
                     if len(c) == 0:
-                        err(f"{d}/{f} chunk {ctag[ic]} not found")
+                        err(f"file {d}/{f} chunk {ctag[ic]} not found")
                     elif len(c) > 1:
-                        info(f"{d}/{f} chunk {ctag[ic]} multiple copies:", " ".join(c))
+                        info(f"multiple copies of file {d}/{f} chunk {ctag[ic]}:", " ".join(c))
                     n += len(c)
         if n == 0 and args.missing_chunks:
             chunks.append(ffc)
