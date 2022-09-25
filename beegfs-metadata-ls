@@ -16,6 +16,7 @@ def parse_args():
     parser.add_argument("-d", "--list-directories", action="store_true")
     parser.add_argument("-c", "--list-chunks", action="store_true")
     parser.add_argument("-e", "--empty-directories", action="store_true")
+    parser.add_argument("-m", "--missing-chunks", action="store_true")
     parser.add_argument("-t", "--tags", action="store_true")
     parser.add_argument("-n", "--max-files", type=int)
     parser.add_argument("-u", "--user", default="")
@@ -36,7 +37,6 @@ def info(*fargs, **fkwargs):
 
 
 def lsdirs(index):
-
     def lsdir(tag, pre, depth=0):
         subs = tags.get(tag)
         if subs is None:
@@ -57,7 +57,7 @@ def lsdirs(index):
     with open(index, encoding="latin-1") as f:
         n = 0
         lines = []
-        joined = ""
+        joined = None
         for l in f:
             n += 1
             line = l.rstrip("\n")
@@ -96,11 +96,21 @@ def lsdirs(index):
 
 
 def lsfiles(index, dirs):
-    fnames = defaultdict(list)
+    dtag = defaultdict(list)
+    dlen = {}
+    for dt in dirs:
+        dlen[dt[1]] = 0
+        dtag[dt[1]].append(dt)
+    for t, dt in dtag.items():
+        if len(dt) != 1:
+            err("tag {t} has multiple dirs:", " ".join([d[0] for d in dt]))
+
     chunks = defaultdict(list)
     max_files = args.max_files
     if max_files is None:
         max_files = -1
+
+    files = []
     with open(index, encoding="latin-1") as f:
         n = 0
         for l in f:
@@ -116,47 +126,64 @@ def lsfiles(index, dirs):
             if ftag == "#fSiDs#":
                 chunks[tag].append(fname)
             else:
-                fnames[ftag].append([tag, fname])
+                dt = dtag.get(ftag)
+                if dt is not None:
+                    dlen[ftag] += 1
+                    files.append([dt, fname, tag, chunks.setdefault(tag, []), False])
 
-    files = []
-    n = 0
-    for d, t in dirs:
-        n += 1
-        tf = fnames.get(t)
-        if tf is None:
-            if args.empty_directories:
+    if args.empty_directories:
+        for t, n in dlen.items():
+            if n != 0:
+                continue
+            dt = dtag.get(t)
+            files.append([dt, "", t, [], True])
+            for d, _ in dt:
                 info("empty dir:", d)
-                files.append([d + "/", [t]])
-        else:
-            for tag, fname in tf:
-                files.append([d + "/" + fname, chunks.get(tag, [])])
 
     return files
 
 
 def lschunks(index, files):
-    fchunks = defaultdict(list)
+    ctags = defaultdict(list)
+    for ff in files:
+        for c in ff[3]:
+            ctags[c].append([ff, [[]] * len(ff[3])])
+    for t, ffc in ctags.items():
+        if len(ffc) > 1 or len(ffc[0][0][0]) > 1:
+            err(
+                "chunk {t} used in multiple files:",
+                " ".join([d + "/" + ffc[0][1] for ffc in ffcl for d, _ in ffc[0][0]]),
+            )
+
+    chunks = []
     with open(index, encoding="latin-1") as f:
         n = 0
         for l in f:
             n += 1
-            line = l.rstrip("\n")
-            fchunks[line.split("/")[-1]].append(line)
+            chunk = l.rstrip("\n")
+            ctag = chunk.split("/")[-1]
+            ffc = ctags.get(ctag)
+            if ffc is not None:
+                n = 0
+                for ff, cc in ffc:
+                    n += sum([len(c) for c in cc])
+                    cc[ff[3].index(ctag)].append(chunk)
+                if n == 0:
+                    chunks.append(ffc)
 
-    chunks = []
-    for fname, tags in files:
-        if fname[-1] == "/":
-            continue
-        cc = []
-        for t in tags:
-            c = fchunks.get(t)
-            if c is None:
-                err(f"{fname} chunk {t} not found")
-            elif len(c) > 1:
-                info(f"{fname} chunk {t} multiple copies:", " ".join(c))
-            else:
-                cc += c
-        chunks.append([fname, tags, cc])
+    for t, ffc in ctags.items():
+        n = 0
+        for ff, cc in ffc:
+            dt, f, t, ctag, e = ff
+            for d, t in dt:
+                for ic, c in enumerate(cc):
+                    if len(c) == 0:
+                        err(f"{d}/{f} chunk {ctag[ic]} not found")
+                    elif len(c) > 1:
+                        info(f"{d}/{f} chunk {ctag[ic]} multiple copies:", " ".join(c))
+                    n += len(c)
+        if n == 0 and args.missing_chunks:
+            chunks.append(ffc)
 
     return chunks
 
@@ -175,20 +202,52 @@ def process():
 
     if args.list_files:
         files = lsfiles(idir / "file-metadata-index.txt", dirs)
-        for f, t in files:
-            if args.tags:
-                print(f + "\t" + " ".join(t))
-            else:
-                print(f)
+        for dt, f, t, c, e in files:
+            for d, _ in dt:
+                if args.tags:
+                    print(d + "/" + f + "\t" + t)
+                else:
+                    print(d + "/" + f)
 
     if args.list_chunks:
         files = lsfiles(idir / "file-metadata-index.txt", dirs)
         chunks = lschunks(idir / "storage-chunk-index.txt", files)
-        for f, t, c in chunks:
-            if args.tags:
-                print(f + "\t" + " ".join(t) + "\t" + " ".join([str(idir / cc) for cc in c]))
-            else:
-                print(f + "\t" + " ".join([str(idir / cc) for cc in c]))
+        for ffc in chunks:
+            for ff, cc in ffc:
+                dt, f, t, c, e = ff
+                for d, _ in dt:
+                    if args.tags:
+                        print(
+                            d
+                            + "/"
+                            + f
+                            + "\t"
+                            + " ".join(c)
+                            + "\t"
+                            + " ".join(
+                                [
+                                    str(idir / chunk[0]) if len(chunk) > 0 else "-"
+                                    for chunk in cc
+                                ]
+                                if sum([len(chunk) for chunk in cc]) > 0
+                                else []
+                            )
+                        )
+                    else:
+                        print(
+                            d
+                            + "/"
+                            + f
+                            + "\t"
+                            + " ".join(
+                                [
+                                    str(idir / chunk[0]) if len(chunk) > 0 else "-"
+                                    for chunk in cc
+                                ]
+                                if sum([len(chunk) for chunk in cc]) > 0
+                                else []
+                            )
+                        )
 
 
 exit(process())
