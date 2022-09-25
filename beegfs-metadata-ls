@@ -61,37 +61,44 @@ def lsdirs(index):
         for l in f:
             n += 1
             line = l.rstrip("\n")
-            if line == "" or " " in line:
+            if line == "" or " " in line or "/" in line:
                 if joined is not None:
-                    err(joined)
+                    info(joined)
                     joined = None
                 if line != "":
                     lines.append(line)
-            elif re.match(
-                r"mercury\d+/meta(/buddymir)?/dentries/[0-9A-f]+/[0-9A-f]+/([0-9A-f]+-[0-9A-f]+-[0-9A-f]+|root)/\S+$",
-                line,
-            ):
-                lines.append(f":{n} " + line)
-                if joined is not None:
-                    err(joined)
-                joined = f"{index}:{n}: missing tag: " + line
             else:
                 if joined is None:
                     joined = f"{index}:{n}: lines joined: " + lines[-1]
-                joined += f"\n    {line}"
-                lines[-1] += " " + line
+                joined += f"\\n{line}"
+                lines[-1] += "\n" + line
         if joined is not None:
-            err(joined)
+            info(joined)
 
         for line in lines:
-            tag, ent = line.split(" ", 1)
+            flds = line.split(" ", 1)
+            if not (len(flds) == 2 and "/" not in flds[0] and "/" in flds[-1]):
+                err(f"{index}: bad format:",re.sub(r"\n",r"\\n",line))
+                continue
+            tag, ent = flds
             stag, sdir = ent.split("/")[-2:]
             tags[stag].append([tag, sdir])
-            if stag == "root" and (args.user == "" or sdir == args.user):
-                toptags[tag] = sdir
+
     dirs = []
-    for toptag, user in toptags.items():
-        dirs += lsdir(toptag, user)
+    if args.user == "":
+        dirs += lsdir("root", "")
+    else:
+        td = tags.get("root")
+        if td is None:
+            err(f"{index}: root directory not found")
+        else:
+            n = 0
+            for t,d in td:
+                if d == args.user:
+                    n += 1
+                    dirs += lsdir(t, d)
+            if n == 0:
+                err(f"{index}: root directory not found:", args.user)
 
     # return list(set(dirs))   # nt so good - reorders the list
     return {dt:0 for dt in dirs}.keys()    # unique tag/dir
