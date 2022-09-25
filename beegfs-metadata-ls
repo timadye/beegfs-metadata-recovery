@@ -61,26 +61,26 @@ def lsdirs(index):
         for l in f:
             n += 1
             line = l.rstrip("\n")
-            if line == "" or " " in line or "/" in line or n<=1:
+            if line == "" or " " in line or "/" in line or n <= 1:
                 if joined is not None:
                     info(joined)
                     joined = None
                 if line != "":
-                    lines.append([line,n])
+                    lines.append([line, n])
             else:
                 last = lines[-1]
                 if joined is None:
-                    lastl,lastn = last
+                    lastl, lastn = last
                     joined = f"{index}:{lastn}: lines joined: {lastl}"
                 joined += f"\\n{line}"
                 last[0] += "\n" + line
         if joined is not None:
             info(joined)
 
-        for line,n in lines:
+        for line, n in lines:
             flds = line.split(" ", 1)
             if not (len(flds) == 2 and "/" not in flds[0] and "/" in flds[-1]):
-                err(f"{index}:{n}: bad format:",re.sub(r"\n",r"\\n",line))
+                err(f"{index}:{n}: bad format:", re.sub(r"\n", r"\\n", line))
                 continue
             tag, ent = flds
             stag, sdir = ent.split("/")[-2:]
@@ -95,7 +95,7 @@ def lsdirs(index):
             err(f"{index}: root directory not found")
         else:
             n = 0
-            for t,d in td:
+            for t, d in td:
                 if d == args.user:
                     n += 1
                     dirs += lsdir(t, d)
@@ -103,7 +103,7 @@ def lsdirs(index):
                 err(f"{index}: root directory not found:", args.user)
 
     # return list(set(dirs))   # nt so good - reorders the list
-    return {dt:0 for dt in dirs}.keys()    # unique tag/dir
+    return {dt: 0 for dt in dirs}.keys()  # unique tag/dir
 
 
 def lsfiles(index, dirs):
@@ -191,7 +191,10 @@ def lschunks(index, files):
                     if len(c) == 0:
                         err(f"file {d}/{f} chunk {ctag[ic]} not found")
                     elif len(c) > 1:
-                        info(f"multiple copies of file {d}/{f} chunk {ctag[ic]}:", " ".join(c))
+                        info(
+                            f"multiple copies of file {d}/{f} chunk {ctag[ic]}:",
+                            " ".join(c),
+                        )
                     n += len(c)
         if n == 0 and args.missing_chunks:
             chunks.append(ffc)
