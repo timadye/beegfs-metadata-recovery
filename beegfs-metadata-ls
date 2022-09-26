@@ -72,7 +72,7 @@ def lsdirs(index):
                 if joined is None:
                     lastl, lastn = last
                     joined = f"{index}:{lastn}: lines joined: {lastl}"
-                joined += f"\\n{line}"
+                joined += f"\\n {line}"
                 last[0] += "\n" + line
         if joined is not None:
             info(joined)
@@ -80,9 +80,10 @@ def lsdirs(index):
         for line, n in lines:
             flds = line.split(" ", 1)
             if not (len(flds) == 2 and "/" not in flds[0] and "/" in flds[-1]):
-                err(f"{index}:{n}: bad format:", re.sub(r"\n", r"\\n", line))
+                err(f"{index}:{n}: bad format:", re.sub(r"\n", " ", line))
                 continue
             tag, ent = flds
+            ent = re.sub(r"\n", " ", line)
             stag, sdir = ent.split("/")[-2:]
             tags[stag].append([tag, sdir])
 
@@ -129,7 +130,7 @@ def lsfiles(index, dirs):
             if max_files >= 0 and n > max_files:
                 break
             w = l.rstrip("\n").split(" ", 1)
-            if len(w) != 2:
+            if not (len(w) == 2 and w[0].isdigit() and "/" in w[1]):
                 err(f"{index}:{n}: bad format:", line)
                 continue
             tag, ent = w
@@ -147,7 +148,7 @@ def lsfiles(index, dirs):
             if n != 0:
                 continue
             dt = dtag.get(t)
-            files.append([dt, "", t, [], True])
+            files.append([dt, "", "", [], True])
             for d, _ in dt:
                 info("empty dir:", d)
 
@@ -156,14 +157,24 @@ def lsfiles(index, dirs):
 
 def lschunks(index, files):
     ctags = defaultdict(list)
+    empty = []
     for ff in files:
-        for c in ff[3]:
-            ctags[c].append([ff, [[]] * len(ff[3])])
+        dt, fname, t, ct, e = ff
+        ffc = [ff, [[]] * len(ct)]
+        if len(ct) == 0:
+            empty.append([ffc])
+            if fname != "":
+                info("empty file:", " ".join([d + "/" + fname for d, _ in dt]))
+            continue
+        for c in ct:
+            # if len(ct)>1, each element gets the same ffc so we can update the appropriate bit for each chunk
+            ctags[c].append(ffc)
+
     for t, ffc in ctags.items():
         if len(ffc) > 1 or len(ffc[0][0][0]) > 1:
             err(
                 f"chunk {t} used in multiple files:",
-                " ".join([d + "/" + ffcc[0][1] for ffcc in ffc for d, _ in ffcc[0][0]]),
+                " ".join([d + "/" + ff[0][1] for ff in ffc for d, _ in ff[0][0]]),
             )
 
     chunks = []
@@ -172,6 +183,9 @@ def lschunks(index, files):
         for l in f:
             n += 1
             chunk = l.rstrip("\n")
+            if " " in chunk or "/" not in chunk:
+                err(f"{index}:{n}: bad format:", chunk)
+                continue
             ctag = chunk.split("/")[-1]
             ffc = ctags.get(ctag)
             if ffc is not None:
@@ -180,24 +194,27 @@ def lschunks(index, files):
                     n += sum([len(c) for c in cc])
                     cc[ff[3].index(ctag)].append(chunk)
                 if n == 0:
+                    # Only append the first time we see a chunk in this file. Other chunks will be added later.
                     chunks.append(ffc)
 
     for t, ffc in ctags.items():
         n = 0
         for ff, cc in ffc:
-            dt, f, t, ctag, e = ff
+            dt, fname, t, ct, e = ff
             for d, t in dt:
                 for ic, c in enumerate(cc):
                     if len(c) == 0:
-                        err(f"file {d}/{f} chunk {ctag[ic]} not found")
+                        err(f"file {d}/{fname} chunk {ct[ic]} not found")
                     elif len(c) > 1:
                         info(
-                            f"multiple copies of file {d}/{f} chunk {ctag[ic]}:",
+                            f"multiple copies of file {d}/{fname} chunk {ct[ic]}:",
                             " ".join(c),
                         )
                     n += len(c)
         if n == 0 and args.missing_chunks:
             chunks.append(ffc)
+
+    chunks += empty
 
     return chunks
 
