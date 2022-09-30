@@ -1,8 +1,16 @@
 #!/usr/bin/env python3
 
 import sys, os, stat, argparse, re, itertools, collections
-from collections import defaultdict
+from collections import defaultdict, namedtuple
 from pathlib import Path
+
+Dir = namedtuple("Dir", ["name", "tag", "meta", "nosub"], defaults=["", "", "", False])
+File = namedtuple(
+    "File",
+    ["dirs", "name", "tag", "chunks", "empty", "meta"],
+    defaults=[[], "", "", [], False, ""],
+)
+FileChunk = namedtuple("FileChunk", ["file", "chunks"], defaults=[File(), []])
 
 args = None
 
@@ -63,31 +71,30 @@ def nodup(lst, key=None):
 
 
 def lsdirs(index):
-    def lsdir(tag, pre, depth=0):
+    def lsdir(name, tag, meta, depth=0):
         subs = tags.get(tag)
-        dirs = [(pre, tag)]
         if subs is None:
-            return dirs
-        if pre != "":
-            pre += "/"
+            return [Dir(name=name, tag=tag, meta=meta, nosub=True)]
+        named = name + ("/" if name else "")
         if depth > 100:
-            err("directory too deep:", pre)
-            return [(pre + "...", tag)]
+            err("directory too deep:", name)
+            return [Dir(name + "...", tag, meta, True)]
         else:
+            dirs = [Dir(name=name, tag=tag, meta=meta, nosub=False)]
             tsubs = defaultdict(list)
             dsubs = defaultdict(list)
-            for t, f, e in subs:
-                if (t, f) not in tsubs:
-                    dirs += lsdir(t, pre + f)
-                tsubs[(t, f)].append(e)
-                dsubs[f].append(e)
-            for (t, f), ee in tsubs.items():
-                if len(ee) > 1:
-                    info(f"directory {pre}{f} is on multiple servers:", " ".join(ee))
-                dsubs.pop(f, None)
-            for f, ee in dsubs.items():
-                if len(ee) > 1:
-                    err(f"directory {pre}{f} has multiple tags:", " ".join(ee))
+            for s in subs:
+                if (s.name, s.tag) not in tsubs:
+                    dirs += lsdir(named + s.name, s.tag, s.meta, depth + 1)
+                tsubs[(s.name, s.tag)].append(s.meta)
+                dsubs[s.name].append(s.meta)
+            for (d, t), mm in tsubs.items():
+                if len(mm) > 1:
+                    info(f"directory {named}{d} is on multiple servers:", " ".join(mm))
+                dsubs.pop(d, None)
+            for d, mm in dsubs.items():
+                if len(mm) > 1:
+                    err(f"directory {name}d{d} has multiple tags:", " ".join(mm))
             return dirs
 
     tags = defaultdict(list)
@@ -119,40 +126,40 @@ def lsdirs(index):
             if not (len(flds) == 2 and "/" not in flds[0] and "/" in flds[-1]):
                 err(f"{index}:{n}: bad format:", re.sub(r"\n", " ", line))
                 continue
-            tag, ent = flds
-            ent = re.sub(r"\n", " ", ent)
-            stag, sdir = ent.split("/")[-2:]
-            tags[stag].append([tag, sdir, ent])
+            tag, meta = flds
+            meta = re.sub(r"\n", " ", meta)
+            stag, sdir = meta.split("/")[-2:]
+            tags[stag].append(Dir(name=sdir, tag=tag, meta=meta))
 
     dirs = []
     if args.user == "":
-        dirs += lsdir("root", "")
+        dirs += lsdir("", "root", "")
     else:
-        td = tags.get("root")
-        if td is None:
+        dd = tags.get("root")
+        if dd is None:
             err(f"{index}: root directory not found")
         else:
             n = 0
-            for t, d, e in td:
-                if d == args.user:
+            for d in dd:
+                if d.name == args.user:
                     n += 1
-                    dirs += lsdir(t, d)
+                    dirs += lsdir(d.name, d.tag, d.meta)
             if n == 0:
                 err(f"{index}: root directory not found:", args.user)
 
     # return list(set(dirs))   # nt so good - reorders the list
-    return nodup(dirs)  # unique tag/dir
+    return nodup(dirs, lambda d: (d.name, d.tag))  # unique tag/dir
 
 
 def lsfiles2(index, dirs):
     dtag = defaultdict(list)
     dlen = {}
-    for dt in dirs:
-        dlen[dt[1]] = 0
-        dtag[dt[1]].append(dt)
-    for t, dt in dtag.items():
-        if len(dt) != 1:
-            err(f"multiple dirs for tag {t}:", " ".join([d for d, _ in dt]))
+    for d in dirs:
+        dlen[d.tag] = 0
+        dtag[d.tag].append(d)
+    for t, dd in dtag.items():
+        if len(dd) != 1:
+            err(f"multiple dirs for tag {t}:", " ".join([d.name for d in dd]))
 
     chunks = defaultdict(list)
     max_files = args.max_files
@@ -170,24 +177,33 @@ def lsfiles2(index, dirs):
             if not (len(w) == 2 and w[0].isdigit() and "/" in w[1]):
                 err(f"{index}:{n}: bad format:", line)
                 continue
-            tag, ent = w
-            ftag, fname = ent.split("/")[-2:]
+            tag, meta = w
+            ftag, fname = meta.split("/")[-2:]
             if ftag == "#fSiDs#":
                 chunks[tag].append(fname)
             else:
-                dt = dtag.get(ftag)
-                if dt is not None:
+                dd = dtag.get(ftag)
+                if dd is not None:
                     dlen[ftag] += 1
-                    files.append([dt, fname, tag, chunks.setdefault(tag, []), False])
+                    files.append(
+                        File(
+                            dirs=dd,
+                            name=fname,
+                            tag=tag,
+                            chunks=chunks.setdefault(tag, []),
+                            empty=False,
+                            meta=meta,
+                        )
+                    )
 
     if args.empty_directories:
         for t, n in dlen.items():
             if n != 0:
                 continue
-            dt = dtag.get(t)
-            files.append([dt, "", "", [], True])
-            for d, _ in dt:
-                info("empty dir:", d)
+            dd = dtag.get(t)
+            files.append(File(dirs=dd, empty=True, meta=dd[0].meta if dd else ""))
+            for d in dd:
+                info("empty dir:", d.name)
 
     return files
 
@@ -197,20 +213,19 @@ def lsfiles(index, dirs):
     files = lsfiles2(index, dirs)
     dfiles = defaultdict(list)
     ufiles = []
-    for ff in files:
-        dt, fname, t, ct, e = ff
-        for d, t in dt:
-            df = f"{d}/{fname}"
+    for f in files:
+        for d in f.dirs:
+            df = f"{d.name}/{f.name}"
             last = dfiles.get(df)
             if last is None:
-                ufiles.append(ff)
-            dfiles[df].append(ff)
+                ufiles.append(f)
+            dfiles[df].append(f)
     for df, ff in dfiles.items():
         if len(ff) > 1:
             err(
                 f"file {df} has multiple tags:",
-                " ".join([t for _, _, t, *_ in ff]) + ", chunks:",
-                " ".join(nodup((c for _, _, _, ct, _ in ff for c in ct))),
+                " ".join([ff.tag for f in ff]) + ", chunks:",
+                " ".join(nodup((c for f in ff for c in f.chunks))),
             )
     return ufiles
 
@@ -218,23 +233,24 @@ def lsfiles(index, dirs):
 def lschunks(index, files):
     ctags = defaultdict(list)
     empty = []
-    for ff in files:
-        dt, fname, t, ct, e = ff
-        ffc = [ff, [[]] * len(ct)]
-        if len(ct) == 0:
-            empty.append([ffc])
-            if fname != "":
-                info("empty file:", " ".join([d + "/" + fname for d, _ in dt]))
+    for f in files:
+        fc = FileChunk(file=f, chunks=[[]] * len(f.chunks))
+        if len(f.chunks) == 0:
+            empty.append([fc])
+            if f.name != "":
+                info("empty file:", " ".join([d.name + "/" + f.name for d in f.dirs]))
             continue
-        for c in ct:
-            # if len(ct)>1, each element gets the same ffc so we can update the appropriate bit for each chunk
-            ctags[c].append(ffc)
+        for c in f.chunks:
+            # if len(f.chunks)>1, each element gets the same fc so we can update the appropriate bit for each chunk
+            ctags[c].append(fc)
 
-    for t, ffc in ctags.items():
-        if len(ffc) > 1 or len(ffc[0][0][0]) > 1:
+    for c, fcc in ctags.items():
+        if len(fcc) > 1 or len(fcc[0].file.dirs) > 1:
             err(
-                f"chunk {t} used in multiple files:",
-                " ".join([d + "/" + ff[0][1] for ff in ffc for d, _ in ff[0][0]]),
+                f"chunk {c} used in multiple files:",
+                " ".join(
+                    [d.name + "/" + fc.file.name for fc in fcc for d in fc.file.dirs]
+                ),
             )
 
     chunks = []
@@ -247,44 +263,46 @@ def lschunks(index, files):
                 err(f"{index}:{n}: bad format:", chunk)
                 continue
             ctag = chunk.split("/")[-1]
-            ffc = ctags.get(ctag)
-            if ffc is not None:
+            fcc = ctags.get(ctag)
+            if fcc is not None:
                 n = 0
-                for ff, cc in ffc:
-                    n += sum([len(c) for c in cc])
-                    cc[ff[3].index(ctag)].append(chunk)
+                for fc in fcc:
+                    n += sum([len(cc) for cc in fc.chunks])
+                    fc.chunks[fc.file.chunks.index(ctag)].append(chunk)
                 if n == 0:
                     # Only append the first time we see a chunk in this file. Other chunks will be added later.
-                    chunks.append(ffc)
+                    chunks.append(fcc)
 
-    for t, ffc in ctags.items():
+    for t, fcc in ctags.items():
         n = 0
-        for ff, cc in ffc:
-            dt, fname, t, ct, e = ff
-            for d, t in dt:
-                if len(ct) > 1:
+        for fc in fcc:
+            f = fc.file
+            for d in f.dirs:
+                if len(f.chunks) > 1:
                     err(
-                        f"multiple chunks for file {d}/{fname}:",
+                        f"multiple chunks for file {d.name}/{f.name}:",
                         " ".join(
-                            itertools.chain.from_iterable(
-                                [
-                                    cc[ic] if cc[ic] else [ctt]
-                                    for ic, cct in enumerate(ct)
+                            [
+                                c
+                                for cc in [
+                                    fc.chunks[ic] if fc.chunks[ic] else [cc]
+                                    for ic, cc in enumerate(f.chunks)
                                 ]
-                            )
+                                for c in cc
+                            ]
                         ),
                     )
-                for ic, c in enumerate(cc):
-                    n += len(c)
-                    if len(c) == 0:
-                        err(f"file {d}/{fname} chunk {ct[ic]} not found")
-                    elif len(c) > 1:
+                for ic, cc in enumerate(fc.chunks):
+                    n += len(cc)
+                    if len(cc) == 0:
+                        err(f"file {d.name}/{f.name} chunk {f.chunks[ic]} not found")
+                    elif len(cc) > 1:
                         info(
-                            f"multiple storage instances for file {d}/{fname} chunk {ct[ic]}:",
-                            " ".join(c),
+                            f"multiple storage instances for file {d.name}/{f.name} chunk {f.chunks[ic]}:",
+                            " ".join(cc),
                         )
         if n == 0 and args.missing_chunks:
-            chunks.append(ffc)
+            chunks.append(fc)
 
     chunks += empty
 
@@ -309,16 +327,16 @@ def process():
         out = sys.stdout
 
     if args.list_directories:
-        for d, t in nodup(dirs, lambda dt: dt[0]):
+        for d in nodup(dirs, lambda d: d.name):
             if args.tags:
-                print(d + "\t" + t, file=out)
+                print(d.name + "\t" + d.tag, file=out)
             else:
-                print(d, file=out)
+                print(d.name, file=out)
 
     if args.list_files:
         files = lsfiles(idir / "file-metadata-index.txt", dirs)
         for f, t in nodup(
-            ((f"{d}/{f}", t) for dt, f, t, c, e in files for d, _ in dt),
+            ((f"{d.name}/{f.name}", f.tag) for f in files for d in f.dirs),
             lambda dft: dft[0],
         ):
             print(f + ("\t" + t if args.tags else ""), file=out)
@@ -328,23 +346,24 @@ def process():
             idir / "storage-chunk-index.txt",
             lsfiles(idir / "file-metadata-index.txt", dirs),
         )
-        for df, c, cc in nodup(
+        for df, cc, fcfc in nodup(
             (
                 (
-                    f"{d}/{f}",
-                    tuple(c),
-                    tuple(nodup((chunk for ccc in cc for chunk in ccc))),
+                    f"{d.name}/{fc.file.name}",
+                    tuple(nodup((c for cc in fc.chunks for c in cc))),
+                    fc.file.chunks,
                 )
-                for ffc in chunks
-                for (dt, f, t, c, e), cc in ffc
-                for d, _ in dt
-            )
+                for fcc in chunks
+                for fc in fcc
+                for d in fc.file.dirs
+            ),
+            lambda a: a[:2],
         ):
             print(
                 str(dest / df)
-                + ("\t" + " ".join(c) if args.tags else "")
+                + ("\t" + " ".join(fcfc) if args.tags else "")
                 + "\t"
-                + " ".join((str(idir / chunk) for chunk in cc)),
+                + " ".join((str(idir / c) for c in cc)),
                 file=out,
             )
 
@@ -355,7 +374,8 @@ def process():
         )
 
         udirs = {
-            d: None for d in (d for ffc in chunks for (dt, *_), _ in ffc for d, _ in dt)
+            d.name: None
+            for d in (d for fcc in chunks for fc in fcc for d in fc.file.dirs)
         }
         # remove redundent mkdir -p
         for d in list(udirs.keys()):
@@ -371,27 +391,21 @@ def process():
         for d in udirs.keys():
             print(f"mkdir -p", quote(str(dest / d)), file=out)
 
-        for d, f, chunk, cc in nodup(
+        for df, c, needsuf in nodup(
             (
-                (d, f, chunk, cc)
-                for ffc in chunks
-                for (dt, f, t, c, e), cc in ffc
-                for d, _ in dt
-                for ccc in cc
-                for chunk in ccc
+                (f"{d.name}/{fc.file.name}", c, sum([len(cc) for cc in fc.chunks]) > 1)
+                for fcc in chunks
+                for fc in fcc
+                for d in fc.file.dirs
+                for cc in fc.chunks
+                for c in cc
             ),
-            lambda a: a[:3],
+            lambda a: a[:2],
         ):
-            needsuf = sum([len(ccc) for ccc in cc]) > 1
             print(
                 args.command,
-                quote(str(idir / chunk)),
-                quote(
-                    str(
-                        dest
-                        / (f"{d}/{f}" + ("." + chunk.split("/")[0] if needsuf else ""))
-                    )
-                ),
+                quote(str(idir / c)),
+                quote(str(dest / (df + ("." + c.split("/")[0] if needsuf else "")))),
                 file=out,
             )
 
