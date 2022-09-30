@@ -52,13 +52,14 @@ def quote(val):
     return val
 
 
-def nodup(lst, key=lambda a: a):
-    if isinstance(lst, list) or isinstance(lst, collections.Iterator):
-        lst = tuple(lst)
+def nodup(lst, key=None):
     dup = {}
-    for e in lst:
-        dup.setdefault(key(e), e)
-    return dup.values()
+    if key is None:
+        return {e: None for e in lst}.keys()
+    else:
+        for e in lst:
+            dup.setdefault(key(e), e)
+        return dup.values()
 
 
 def lsdirs(index):
@@ -80,23 +81,21 @@ def lsdirs(index):
                     dirs += lsdir(t, pre + f)
                 tsubs[(t, f)].append(e)
                 dsubs[f].append(e)
-            for tf, ee in tsubs.items():
+            for (t, f), ee in tsubs.items():
                 if len(ee) > 1:
-                    info(
-                        f"directory {pre}{tf[1]} is on multiple servers:", " ".join(ee)
-                    )
-                dsubs.pop(tf[1], None)
+                    info(f"directory {pre}{f} is on multiple servers:", " ".join(ee))
+                dsubs.pop(f, None)
             for f, ee in dsubs.items():
                 if len(ee) > 1:
                     err(f"directory {pre}{f} has multiple tags:", " ".join(ee))
             return dirs
 
     tags = defaultdict(list)
-    with open(index, encoding="latin-1") as f:
+    with open(index, encoding="latin-1") as fin:
         n = 0
         lines = []
         joined = None
-        for l in f:
+        for l in fin:
             n += 1
             line = l.rstrip("\n")
             if line == "" or " " in line or "/" in line or n <= 1:
@@ -153,7 +152,7 @@ def lsfiles2(index, dirs):
         dtag[dt[1]].append(dt)
     for t, dt in dtag.items():
         if len(dt) != 1:
-            err(f"multiple dirs for tag {t}:", " ".join([d[0] for d in dt]))
+            err(f"multiple dirs for tag {t}:", " ".join([d for d, _ in dt]))
 
     chunks = defaultdict(list)
     max_files = args.max_files
@@ -161,9 +160,9 @@ def lsfiles2(index, dirs):
         max_files = -1
 
     files = []
-    with open(index, encoding="latin-1") as f:
+    with open(index, encoding="latin-1") as fin:
         n = 0
-        for l in f:
+        for l in fin:
             n += 1
             if max_files >= 0 and n > max_files:
                 break
@@ -197,18 +196,23 @@ def lsfiles2(index, dirs):
 def lsfiles(index, dirs):
     files = lsfiles2(index, dirs)
     dfiles = defaultdict(list)
+    ufiles = []
     for ff in files:
         dt, fname, t, ct, e = ff
         for d, t in dt:
-            dfiles[f"{d}/{fname}"].append(ff)
-    for f, ff in dfiles.items():
+            df = f"{d}/{fname}"
+            last = dfiles.get(df)
+            if last is None:
+                ufiles.append(ff)
+            dfiles[df].append(ff)
+    for df, ff in dfiles.items():
         if len(ff) > 1:
             err(
-                f"file {f} has multiple tags:",
-                " ".join([a[2] for a in ff]) + ", chunks:",
-                " ".join(nodup((str(c) for fff in ff for c in fff[3]))),
+                f"file {df} has multiple tags:",
+                " ".join([t for _, _, t, *_ in ff]) + ", chunks:",
+                " ".join(nodup((c for _, _, _, ct, _ in ff for c in ct))),
             )
-    return files
+    return ufiles
 
 
 def lschunks(index, files):
@@ -234,9 +238,9 @@ def lschunks(index, files):
             )
 
     chunks = []
-    with open(index, encoding="latin-1") as f:
+    with open(index, encoding="latin-1") as fin:
         n = 0
-        for l in f:
+        for l in fin:
             n += 1
             chunk = l.rstrip("\n")
             if " " in chunk or "/" not in chunk:
@@ -305,7 +309,7 @@ def process():
         out = sys.stdout
 
     if args.list_directories:
-        for d, t in nodup(dirs, lambda a: a[0]):
+        for d, t in nodup(dirs, lambda dt: dt[0]):
             if args.tags:
                 print(d + "\t" + t, file=out)
             else:
@@ -314,41 +318,45 @@ def process():
     if args.list_files:
         files = lsfiles(idir / "file-metadata-index.txt", dirs)
         for f, t in nodup(
-            ((f"{d}/{f}", t) for dt, f, t, c, e in files for d, _ in dt), lambda a: a[0]
+            ((f"{d}/{f}", t) for dt, f, t, c, e in files for d, _ in dt),
+            lambda dft: dft[0],
         ):
             print(f + ("\t" + t if args.tags else ""), file=out)
 
     if args.list_chunks:
-        files = lsfiles(idir / "file-metadata-index.txt", dirs)
-        chunks = lschunks(idir / "storage-chunk-index.txt", files)
-        for ffc in chunks:
-            for ff, cc in ffc:
-                dt, f, t, c, e = ff
-                for d, _ in dt:
-                    print(
-                        str(dest / f"{d}/{f}")
-                        + ("\t" + " ".join(c) if args.tags else "")
-                        + "\t"
-                        + " ".join(
-                            itertools.chain.from_iterable(
-                                [
-                                    [str(idir / chunk) for chunk in ccc]
-                                    if ccc
-                                    else ["-"]
-                                    for ccc in cc
-                                ]
-                            )
-                            if sum([len(ccc) for ccc in cc])
-                            else []
-                        ),
-                        file=out,
-                    )
+        chunks = lschunks(
+            idir / "storage-chunk-index.txt",
+            lsfiles(idir / "file-metadata-index.txt", dirs),
+        )
+        for df, c, cc in nodup(
+            (
+                (
+                    f"{d}/{f}",
+                    tuple(c),
+                    tuple(nodup((chunk for ccc in cc for chunk in ccc))),
+                )
+                for ffc in chunks
+                for (dt, f, t, c, e), cc in ffc
+                for d, _ in dt
+            )
+        ):
+            print(
+                str(dest / df)
+                + ("\t" + " ".join(c) if args.tags else "")
+                + "\t"
+                + " ".join((str(idir / chunk) for chunk in cc)),
+                file=out,
+            )
 
     if args.script:
-        files = lsfiles(idir / "file-metadata-index.txt", dirs)
-        chunks = lschunks(idir / "storage-chunk-index.txt", files)
+        chunks = lschunks(
+            idir / "storage-chunk-index.txt",
+            lsfiles(idir / "file-metadata-index.txt", dirs),
+        )
 
-        udirs = nodup([d for ffc in chunks for ff, _ in ffc for d, _ in ff[0]])
+        udirs = {
+            d: None for d in (d for ffc in chunks for (dt, *_), _ in ffc for d, _ in dt)
+        }
         # remove redundent mkdir -p
         for d in list(udirs.keys()):
             while True:
@@ -363,31 +371,29 @@ def process():
         for d in udirs.keys():
             print(f"mkdir -p", quote(str(dest / d)), file=out)
 
-        for ffc in chunks:
-            for ff, cc in ffc:
-                dt, f, t, c, e = ff
-                for d, _ in dt:
-                    needsuf = sum([len(ccc) for ccc in cc]) > 1
-                    for ccc in cc:
-                        for chunk in ccc:
-                            print(
-                                args.command,
-                                quote(str(idir / chunk)),
-                                quote(
-                                    str(
-                                        dest
-                                        / (
-                                            f"{d}/{f}"
-                                            + (
-                                                "." + chunk.split("/")[0]
-                                                if needsuf
-                                                else ""
-                                            )
-                                        )
-                                    )
-                                ),
-                                file=out,
-                            )
+        for d, f, chunk, cc in nodup(
+            (
+                (d, f, chunk, cc)
+                for ffc in chunks
+                for (dt, f, t, c, e), cc in ffc
+                for d, _ in dt
+                for ccc in cc
+                for chunk in ccc
+            ),
+            lambda a: a[:3],
+        ):
+            needsuf = sum([len(ccc) for ccc in cc]) > 1
+            print(
+                args.command,
+                quote(str(idir / chunk)),
+                quote(
+                    str(
+                        dest
+                        / (f"{d}/{f}" + ("." + chunk.split("/")[0] if needsuf else ""))
+                    )
+                ),
+                file=out,
+            )
 
     if args.output is not None:
         out.close()
