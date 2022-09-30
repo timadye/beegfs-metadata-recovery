@@ -4,13 +4,15 @@ import sys, os, stat, argparse, re, itertools, collections
 from collections import defaultdict, namedtuple
 from pathlib import Path
 
-Dir = namedtuple("Dir", ["name", "tag", "meta", "nosub"], defaults=["", "", "", False])
+Dir = namedtuple(
+    "Dir", ["name", "tag", "meta", "nosub"]
+)  # defaults=["", "", "", False]  # py3.7
 File = namedtuple(
-    "File",
-    ["dirs", "name", "tag", "chunks", "empty", "meta"],
-    defaults=[[], "", "", [], False, ""],
-)
-FileChunk = namedtuple("FileChunk", ["file", "chunks"], defaults=[File(), []])
+    "File", ["dirs", "name", "tag", "chunks", "empty", "meta"]
+)  # defaults=[[], "", "", [], False, ""] # py3.7
+FileChunk = namedtuple(
+    "FileChunk", ["file", "chunks"]
+)  # defaults=[File(), []]  # py3.7
 
 args = None
 
@@ -78,7 +80,7 @@ def lsdirs(index):
         named = name + ("/" if name else "")
         if depth > 100:
             err("directory too deep:", name)
-            return [Dir(name + "...", tag, meta, True)]
+            return [Dir(name=name + "...", tag=tag, meta=meta, nosub=True)]
         else:
             dirs = [Dir(name=name, tag=tag, meta=meta, nosub=False)]
             tsubs = defaultdict(list)
@@ -129,7 +131,7 @@ def lsdirs(index):
             tag, meta = flds
             meta = re.sub(r"\n", " ", meta)
             stag, sdir = meta.split("/")[-2:]
-            tags[stag].append(Dir(name=sdir, tag=tag, meta=meta))
+            tags[stag].append(Dir(name=sdir, tag=tag, meta=meta, nosub=False))
 
     dirs = []
     if args.user == "":
@@ -201,7 +203,7 @@ def lsfiles2(index, dirs):
             if n != 0:
                 continue
             dd = dtag.get(t)
-            files.append(File(dirs=dd, empty=True, meta=dd[0].meta if dd else ""))
+            files.append(File(dirs=dd, name="", tag=dd[0].tag, chunks=[], empty=True, meta=dd[0].meta if dd else ""))
             for d in dd:
                 info("empty dir:", d.name)
 
