@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-import sys, argparse, re, itertools
+import sys, os, stat, argparse, re, itertools, collections
 from collections import defaultdict
 from pathlib import Path
 
@@ -15,11 +15,15 @@ def parse_args():
     parser.add_argument("-f", "--list-files", action="store_true")
     parser.add_argument("-d", "--list-directories", action="store_true")
     parser.add_argument("-c", "--list-chunks", action="store_true")
+    parser.add_argument("-s", "--script", action="store_true")
     parser.add_argument("-e", "--empty-directories", action="store_true")
     parser.add_argument("-m", "--missing-chunks", action="store_true")
     parser.add_argument("-t", "--tags", action="store_true")
     parser.add_argument("-n", "--max-files", type=int)
     parser.add_argument("-u", "--user", default="")
+    parser.add_argument("-o", "--output")
+    parser.add_argument("-C", "--command", default="cp -pi")
+    parser.add_argument("-D", "--dest-dir", default="")
     parser.add_argument("dir", nargs="?", default=".")
     args = parser.parse_args()
 
@@ -36,24 +40,58 @@ def info(*fargs, **fkwargs):
     print(*fargs, file=sys.stderr, **fkwargs)
 
 
+def quote(val):
+    """Quote/escape a string in a safe way for Bourne-style shells."""
+    if (
+        val == ""
+        or re.search(r"[][(){}<>;&|*?^!$`'\\\"\s]", val)
+        or val[0] == "~"
+        or re.search(r"[:=]~", val)
+    ):
+        return '"' + re.sub(r'([\\$"`])', r"\\\1", val) + '"'
+    return val
+
+
+def nodup(lst, key=lambda a: a):
+    if isinstance(lst, list) or isinstance(lst, collections.Iterator):
+        lst = tuple(lst)
+    dup = {}
+    for e in lst:
+        dup.setdefault(key(e), e)
+    return dup.values()
+
+
 def lsdirs(index):
     def lsdir(tag, pre, depth=0):
         subs = tags.get(tag)
+        dirs = [(pre, tag)]
         if subs is None:
-            return [(pre, tag)]
+            return dirs
         if pre != "":
             pre += "/"
         if depth > 100:
             err("directory too deep:", pre)
             return [(pre + "...", tag)]
         else:
-            dirs = []
-            for t, f in subs:
-                dirs += lsdir(t, pre + f)
+            tsubs = defaultdict(list)
+            dsubs = defaultdict(list)
+            for t, f, e in subs:
+                if (t, f) not in tsubs:
+                    dirs += lsdir(t, pre + f)
+                tsubs[(t, f)].append(e)
+                dsubs[f].append(e)
+            for tf, ee in tsubs.items():
+                if len(ee) > 1:
+                    info(
+                        f"directory {pre}{tf[1]} is on multiple servers:", " ".join(ee)
+                    )
+                dsubs.pop(tf[1], None)
+            for f, ee in dsubs.items():
+                if len(ee) > 1:
+                    err(f"directory {pre}{f} has multiple tags:", " ".join(ee))
             return dirs
 
     tags = defaultdict(list)
-    toptags = {}
     with open(index, encoding="latin-1") as f:
         n = 0
         lines = []
@@ -83,9 +121,9 @@ def lsdirs(index):
                 err(f"{index}:{n}: bad format:", re.sub(r"\n", " ", line))
                 continue
             tag, ent = flds
-            ent = re.sub(r"\n", " ", line)
+            ent = re.sub(r"\n", " ", ent)
             stag, sdir = ent.split("/")[-2:]
-            tags[stag].append([tag, sdir])
+            tags[stag].append([tag, sdir, ent])
 
     dirs = []
     if args.user == "":
@@ -96,7 +134,7 @@ def lsdirs(index):
             err(f"{index}: root directory not found")
         else:
             n = 0
-            for t, d in td:
+            for t, d, e in td:
                 if d == args.user:
                     n += 1
                     dirs += lsdir(t, d)
@@ -104,10 +142,10 @@ def lsdirs(index):
                 err(f"{index}: root directory not found:", args.user)
 
     # return list(set(dirs))   # nt so good - reorders the list
-    return {dt: 0 for dt in dirs}.keys()  # unique tag/dir
+    return nodup(dirs)  # unique tag/dir
 
 
-def lsfiles(index, dirs):
+def lsfiles2(index, dirs):
     dtag = defaultdict(list)
     dlen = {}
     for dt in dirs:
@@ -152,6 +190,24 @@ def lsfiles(index, dirs):
             for d, _ in dt:
                 info("empty dir:", d)
 
+    return files
+
+
+# put duplicate check in a separate function to reduce memory usage
+def lsfiles(index, dirs):
+    files = lsfiles2(index, dirs)
+    dfiles = defaultdict(list)
+    for ff in files:
+        dt, fname, t, ct, e = ff
+        for d, t in dt:
+            dfiles[f"{d}/{fname}"].append(ff)
+    for f, ff in dfiles.items():
+        if len(ff) > 1:
+            err(
+                f"file {f} has multiple tags:",
+                " ".join([a[2] for a in ff]) + ", chunks:",
+                " ".join(nodup((str(c) for fff in ff for c in fff[3]))),
+            )
     return files
 
 
@@ -235,22 +291,32 @@ def process():
     parse_args()
     idir = Path(args.dir)
     dirs = lsdirs(idir / "dir-metadata-index.txt")
+    dest = Path(args.dest_dir)
+
+    if args.output is not None:
+        out = open(args.output, "w")
+        if args.script:
+            os.chmod(
+                out.fileno(),
+                os.stat(out.fileno()).st_mode
+                | (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH),
+            )
+    else:
+        out = sys.stdout
 
     if args.list_directories:
-        for d, t in dirs:
+        for d, t in nodup(dirs, lambda a: a[0]):
             if args.tags:
-                print(d + "\t" + t)
+                print(d + "\t" + t, file=out)
             else:
-                print(d)
+                print(d, file=out)
 
     if args.list_files:
         files = lsfiles(idir / "file-metadata-index.txt", dirs)
-        for dt, f, t, c, e in files:
-            for d, _ in dt:
-                if args.tags:
-                    print(d + "/" + f + "\t" + t)
-                else:
-                    print(d + "/" + f)
+        for f, t in nodup(
+            ((f"{d}/{f}", t) for dt, f, t, c, e in files for d, _ in dt), lambda a: a[0]
+        ):
+            print(f + ("\t" + t if args.tags else ""), file=out)
 
     if args.list_chunks:
         files = lsfiles(idir / "file-metadata-index.txt", dirs)
@@ -260,9 +326,7 @@ def process():
                 dt, f, t, c, e = ff
                 for d, _ in dt:
                     print(
-                        d
-                        + "/"
-                        + f
+                        str(dest / f"{d}/{f}")
                         + ("\t" + " ".join(c) if args.tags else "")
                         + "\t"
                         + " ".join(
@@ -276,8 +340,57 @@ def process():
                             )
                             if sum([len(ccc) for ccc in cc])
                             else []
-                        )
+                        ),
+                        file=out,
                     )
+
+    if args.script:
+        files = lsfiles(idir / "file-metadata-index.txt", dirs)
+        chunks = lschunks(idir / "storage-chunk-index.txt", files)
+
+        udirs = nodup([d for ffc in chunks for ff, _ in ffc for d, _ in ff[0]])
+        # remove redundent mkdir -p
+        for d in list(udirs.keys()):
+            while True:
+                i = d.rfind("/")
+                if i < 0:
+                    break
+                d = d[:i]
+                if d in udirs:
+                    udirs.pop(d, None)
+
+        print("#!/bin/sh -x", file=out)
+        for d in udirs.keys():
+            print(f"mkdir -p", quote(str(dest / d)), file=out)
+
+        for ffc in chunks:
+            for ff, cc in ffc:
+                dt, f, t, c, e = ff
+                for d, _ in dt:
+                    needsuf = sum([len(ccc) for ccc in cc]) > 1
+                    for ccc in cc:
+                        for chunk in ccc:
+                            print(
+                                args.command,
+                                quote(str(idir / chunk)),
+                                quote(
+                                    str(
+                                        dest
+                                        / (
+                                            f"{d}/{f}"
+                                            + (
+                                                "." + chunk.split("/")[0]
+                                                if needsuf
+                                                else ""
+                                            )
+                                        )
+                                    )
+                                ),
+                                file=out,
+                            )
+
+    if args.output is not None:
+        out.close()
 
 
 exit(process())
