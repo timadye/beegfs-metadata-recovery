@@ -434,19 +434,18 @@ def process():
         for d in udirs.keys():
             print(f"mkdir -p", quote(str(dest / d)), file=out)
 
-        for df, s, needsuf in nodup(
-            (
-                (
-                    dirfile(f.dir.name, f.name),
-                    s,
-                    sum([len(c.stors) for c in f.chunks]) > 1,
-                )
-                for f in cfiles
-                for c in f.chunks
-                for s in c.stors
-            ),
-            lambda a: a[:2],
-        ):
+        links = []
+        for f in cfiles:
+            needsuf = (sum([len(c.stors) for c in f.chunks]) > 1)
+            needsuf = len(f.chunks) > 1 or sum([len(c.stors) for c in f.chunks]) > 1
+            for c in f.chunks:
+                if c.stors:
+                    for s in c.stors:
+                        links.append((dirfile(f.dir.name, f.name), s, needsuf))
+                else:
+                    links.append((dirfile(f.dir.name, f.name), c.meta, needsuf))
+
+        for df, s, needsuf in nodup(links):
             print(
                 args.command,
                 quote(str(idir / s)),
