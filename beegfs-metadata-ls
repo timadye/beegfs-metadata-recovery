@@ -27,6 +27,7 @@ def parse_args():
     parser.add_argument("-e", "--empty-directories", action="store_true")
     parser.add_argument("-m", "--missing-chunks", action="store_true")
     parser.add_argument("-t", "--tags", action="store_true")
+    parser.add_argument("-M", "--metadata", action="store_true")
     parser.add_argument("-n", "--max-files", type=int)
     parser.add_argument("-u", "--user", default="")
     parser.add_argument("-o", "--output")
@@ -58,6 +59,13 @@ def quote(val):
     ):
         return '"' + re.sub(r'([\\$"`])', r"\\\1", val) + '"'
     return val
+
+
+def dirfile(dir, file):
+    if dir:
+        return f"{dir}/{file}"
+    else:
+        return file
 
 
 def nodup(lst, key=None):
@@ -196,6 +204,8 @@ def lsfiles2(index, dirs):
                 dd = dtag.get(ftag)
                 if dd is not None:
                     dlen[ftag] += len(dd)
+                    i = meta.rfind("/")
+                    xmeta = meta[:i] if i >= 0 else meta
                     for d in dd:
                         files.append(
                             File(
@@ -204,7 +214,7 @@ def lsfiles2(index, dirs):
                                 tags=[tag],
                                 chunks=chunks.setdefault(tag, []),
                                 empty=False,
-                                metas=[meta],
+                                metas=[xmeta],
                             )
                         )
 
@@ -235,7 +245,7 @@ def lsfiles(index, dirs):
     dfiles = {}
     ufiles = []
     for f in files:
-        df = f"{f.dir.name}/{f.name}"
+        df = dirfile(f.dir.name, f.name)
         last = dfiles.get(df)
         if last is None:
             ufiles.append(f)
@@ -247,7 +257,9 @@ def lsfiles(index, dirs):
     for f in ufiles:
         if len(f.tags) > 1:
             err(
-                f"file {f.dir.name}/{f.name} has multiple tags:",
+                "file",
+                dirfile(f.dir.name, f.name),
+                "has multiple tags:",
                 " ".join(f.tags) + ", chunks:",
                 " ".join(nodup((c.tag for c in f.chunks))),
             )
@@ -261,7 +273,7 @@ def lschunks(index, files):
         if len(f.chunks) == 0:
             empty.append(f)
             if f.name != "":
-                info(f"empty file: {f.dir.name}/{f.name}")
+                info("empty file:", dirfile(f.dir.name, f.name))
         for c in f.chunks:
             # if len(f.chunks)>1, each element gets the same f so we can update the appropriate bit for each chunk
             ctags[c.tag].append(f)
@@ -303,16 +315,19 @@ def lschunks(index, files):
             n = 0
             if len(f.chunks) > 1:
                 err(
-                    f"multiple chunks for file {f.dir.name}/{f.name}:",
+                    "multiple chunks for file",
+                    dirfile(f.dir.name, f.name) + ":",
                     " ".join([c.tag for c in f.chunks]),
                 )
             for c in f.chunks:
                 n += len(c.stors)
                 if len(c.stors) == 0:
-                    err(f"file {f.dir.name}/{f.name} chunk {c.tag} not found")
+                    err("file", dirfile(f.dir.name, f.name), f"chunk {c.tag} not found")
                 elif len(c.stors) > 1:
                     info(
-                        f"multiple storage instances for file {f.dir.name}/{f.name} chunk {c.tag}:",
+                        "multiple storage instances for file",
+                        dirfile(f.dir.name, f.name),
+                        f"chunk {c.tag}:",
                         " ".join(c.stors),
                     )
             if n == 0 and args.missing_chunks:
@@ -342,40 +357,59 @@ def process():
 
     if args.list_directories:
         for d in nodup(dirs, lambda d: d.name):
-            if args.tags:
-                print(d.name + "\t" + d.tag, file=out)
-            else:
-                print(d.name, file=out)
+            print(
+                d.name
+                + ("\t" + d.tag if args.tags else "")
+                + ("\t" + " ".join(d.metas) if args.metadata else ""),
+                file=out,
+            )
 
     if args.list_files:
         files = lsfiles(idir / "file-metadata-index.txt", dirs)
-        for f, t in nodup(
-            ((f"{f.dir.name}/{f.name}", tuple(f.tags)) for f in files),
-            lambda dft: dft[0],
-        ):
-            print(f + ("\t" + " ".join(t) if args.tags else ""), file=out)
+        for f in nodup(files, lambda f: (f.dir.name, f.name)):
+            print(
+                dirfile(f.dir.name, f.name)
+                + ("\t" + " ".join(f.tags) if args.tags else "")
+                + (
+                    "\t" + " ".join(f.metas)
+                    if args.metadata
+                    else ""
+                ),
+                file=out,
+            )
 
     if args.list_chunks:
         cfiles = lschunks(
             idir / "storage-chunk-index.txt",
             lsfiles(idir / "file-metadata-index.txt", dirs),
         )
-        for df, ss, ctt in nodup(
-            (
-                (
-                    f"{f.dir.name}/{f.name}",
-                    tuple(nodup((s for c in f.chunks for s in c.stors))),
-                    tuple(nodup((c.tag for c in f.chunks))),
-                )
-                for f in cfiles
+        for f in nodup(
+            cfiles,
+            lambda f: (
+                f.dir.name,
+                f.name,
+                tuple(nodup((s for c in f.chunks for s in c.stors))),
             ),
-            lambda a: a[:2],
         ):
             print(
-                str(dest / df)
-                + ("\t" + " ".join(ctt) if args.tags else "")
-                + "\t"
-                + " ".join((str(idir / s) for s in ss)),
+                str(dest / dirfile(f.dir.name, f.name))
+                + (
+                    "\t" + " ".join(nodup((c.tag for c in f.chunks)))
+                    if args.tags
+                    else ""
+                )
+                + (
+                    "\t" + " ".join(nodup(c.meta for c in f.chunks))
+                    if args.metadata
+                    else ""
+                )
+                +"\t"
+                + " ".join(
+                    (
+                        str(idir / s)
+                        for s in nodup((s for c in f.chunks for s in c.stors))
+                    )
+                ),
                 file=out,
             )
 
@@ -403,7 +437,7 @@ def process():
         for df, s, needsuf in nodup(
             (
                 (
-                    f"{f.dir.name}/{f.name}",
+                    dirfile(f.dir.name, f.name),
                     s,
                     sum([len(c.stors) for c in f.chunks]) > 1,
                 )
