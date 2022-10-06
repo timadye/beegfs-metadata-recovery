@@ -5,7 +5,7 @@ from collections import defaultdict, namedtuple
 from pathlib import Path
 
 Dir = namedtuple(
-    "Dir", ["name", "tag", "metas", "nosub"]
+    "Dir", ["name", "tag", "metas", "nosub", "parent"]
 )  # defaults=["", "", [], False]  # py3.7
 File = namedtuple(
     "File", ["dir", "name", "tags", "chunks", "empty", "metas"]
@@ -33,7 +33,7 @@ def parse_args():
     parser.add_argument("-o", "--output")
     parser.add_argument("-C", "--command", default="cp -pi")
     parser.add_argument("-D", "--dest-dir", default="")
-    parser.add_argument("dir", nargs="?", default=".")
+    parser.add_argument("dir", nargs="?", default="")
     args = parser.parse_args()
 
 
@@ -92,23 +92,48 @@ def uextend(lst, ext, key=None):
 
 
 def lsdirs(index):
-    def lsdir(name, tag, metas, depth=0):
+    def lsdir(name, tag, metas, parent=None, select="", depth=0):
         subs = tags.get(tag)
         if subs is None:
-            return [Dir(name=name, tag=tag, metas=metas, nosub=True)]
+            if (name + "/").startswith(select):
+                return [Dir(name=name, tag=tag, metas=metas, parent=parent, nosub=True)]
+            else:
+                return []
         named = name + ("/" if name else "")
         if depth > 100:
-            err("directory too deep:", name)
-            return [Dir(name=name + "...", tag=tag, metas=metas, nosub=True)]
+            if (name + "/").startswith(select):
+                err("directory too deep:", name)
+                return [
+                    Dir(
+                        name=name + "...",
+                        tag=tag,
+                        metas=metas,
+                        parent=parent,
+                        nosub=True,
+                    )
+                ]
+            else:
+                return []
         else:
-            dirs = [Dir(name=name, tag=tag, metas=metas, nosub=False)]
+            this = Dir(name=name, tag=tag, metas=metas, parent=parent, nosub=False)
+            if (name + "/").startswith(select):
+                dirs = [this]
+            else:
+                dirs = []
             tsubs = defaultdict(list)
             dsubs = defaultdict(list)
             for s in subs:
                 tsub = tsubs.setdefault((s.name, s.tag), [])
                 tsub.extend(s.metas)
                 if len(tsub) == 1:
-                    dirs += lsdir(named + s.name, s.tag, tsub, depth + 1)
+                    dirs += lsdir(
+                        name=named + s.name,
+                        tag=s.tag,
+                        metas=tsub,
+                        parent=this,
+                        select=select,
+                        depth=depth + 1,
+                    )
                 dsubs[s.name].append(s.metas)
             for (d, t), mm in tsubs.items():
                 if len(mm) > 1:
@@ -151,25 +176,11 @@ def lsdirs(index):
             tag, meta = flds
             meta = re.sub(r"\n", " ", meta)
             stag, sdir = meta.split("/")[-2:]
-            tags[stag].append(Dir(name=sdir, tag=tag, metas=[meta], nosub=False))
+            tags[stag].append(
+                Dir(name=sdir, tag=tag, metas=[meta], parent=None, nosub=False)
+            )
 
-    dirs = []
-    if args.user == "":
-        dirs += lsdir("", "root", [])
-    else:
-        dd = tags.get("root")
-        if dd is None:
-            err(f"{index}: root directory not found")
-        else:
-            n = 0
-            for d in dd:
-                if d.name == args.user:
-                    n += 1
-                    dirs += lsdir(d.name, d.tag, d.metas)
-            if n == 0:
-                err(f"{index}: root directory not found:", args.user)
-
-    # return list(set(dirs))   # nt so good - reorders the list
+    dirs = lsdir(name="", tag="root", metas=[], select=args.user + "/")
     return nodup(dirs, lambda d: (d.name, d.tag))  # unique tag/dir
 
 
@@ -370,11 +381,7 @@ def process():
             print(
                 dirfile(f.dir.name, f.name)
                 + ("\t" + " ".join(f.tags) if args.tags else "")
-                + (
-                    "\t" + " ".join(f.metas)
-                    if args.metadata
-                    else ""
-                ),
+                + ("\t" + " ".join(f.metas) if args.metadata else ""),
                 file=out,
             )
 
@@ -403,7 +410,7 @@ def process():
                     if args.metadata
                     else ""
                 )
-                +"\t"
+                + "\t"
                 + " ".join(
                     (
                         str(idir / s)
@@ -422,21 +429,19 @@ def process():
         udirs = {f.dir.name: True for f in cfiles}
         # remove redundent mkdir -p
         for d in list(udirs.keys()):
-            while True:
-                i = d.rfind("/")
-                if i < 0:
-                    break
-                d = d[:i]
+            while d.parent:
+                d = d.parent
                 if d in udirs:
                     udirs.pop(d, None)
 
-        print("#!/bin/sh -x", file=out)
+        print("#!/bin/bash -x", file=out)
         for d in udirs.keys():
-            print(f"mkdir -p", quote(str(dest / d)), file=out)
+            print("mkdir -p", quote(str(dest / d)), file=out)
+        del udirs
 
         links = []
         for f in cfiles:
-            needsuf = (sum([len(c.stors) for c in f.chunks]) > 1)
+            needsuf = sum([len(c.stors) for c in f.chunks]) > 1
             needsuf = len(f.chunks) > 1 or sum([len(c.stors) for c in f.chunks]) > 1
             for c in f.chunks:
                 if c.stors:
@@ -452,6 +457,29 @@ def process():
                 quote(str(dest / (df + ("." + s.split("/")[0] if needsuf else "")))),
                 file=out,
             )
+        del links
+
+        # find all needed dirs and their parents
+        udirs = {}
+        for f in cfiles:
+            d = f.dir
+            udirs.setdefault(d.name, d)
+            while d.parent:
+                d = d.parent
+                udirs.setdefault(d.name, d)
+
+        for d in udirs.values():
+            if len(d.metas) == 1:
+                print(
+                    "touch -r", quote(str(idir / d.metas[0])), quote(str(dest / d.name))
+                )
+            elif len(d.metas) > 1:
+                print(
+                    "touch -r $(ls -1dt",
+                    " ".join([quote(str(idir / m)) for m in d.metas]),
+                    "| head -1)",
+                    quote(str(dest / d.name)),
+                )
 
     if args.output is not None:
         out.close()
