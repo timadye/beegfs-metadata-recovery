@@ -488,6 +488,7 @@ def process():
                     " ".join([quote(str(idir / m)) for m in d.metas]),
                     "| head -1)",
                     quote(str(dest / d.name)),
+                    file=out,
                 )
 
     if args.output is not None:
