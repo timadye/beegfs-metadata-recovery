@@ -92,7 +92,7 @@ def uextend(lst, ext, key=None):
 
 
 def lsdirs(index):
-    def lsdir(name, tag, metas, parent=None, select="", depth=0):
+    def lsdir(name, tag, metas, parent=None, select="", top=None, depth=0):
         subs = tags.get(tag)
         if subs is None:
             if (name + "/").startswith(select):
@@ -123,6 +123,9 @@ def lsdirs(index):
             tsubs = defaultdict(list)
             dsubs = defaultdict(list)
             for s in subs:
+                if top is not None and s.name == top:
+                    metas.extend(s.metas)
+                    continue
                 tsub = tsubs.setdefault((s.name, s.tag), [])
                 tsub.extend(s.metas)
                 if len(tsub) == 1:
@@ -180,7 +183,13 @@ def lsdirs(index):
                 Dir(name=sdir, tag=tag, metas=[meta], parent=None, nosub=False)
             )
 
-    dirs = lsdir(name="", tag="root", metas=[], select=args.user + "/")
+    dirs = lsdir(
+        name="",
+        tag="root",
+        metas=[],
+        top="root",
+        select=args.user + "/" if args.user else "",
+    )
     return nodup(dirs, lambda d: (d.name, d.tag))  # unique tag/dir
 
 
