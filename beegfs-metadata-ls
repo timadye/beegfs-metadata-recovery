@@ -426,13 +426,13 @@ def process():
             lsfiles(idir / "file-metadata-index.txt", dirs),
         )
 
-        udirs = {f.dir.name: True for f in cfiles}
+        udirs = {f.dir.name: f.dir for f in cfiles}
         # remove redundent mkdir -p
-        for d in list(udirs.keys()):
+        for d in list(udirs.values()):
             while d.parent:
                 d = d.parent
-                if d in udirs:
-                    udirs.pop(d, None)
+                if d.name in udirs:
+                    udirs.pop(d.name, None)
 
         print("#!/bin/bash -x", file=out)
         for d in udirs.keys():
