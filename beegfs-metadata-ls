@@ -480,7 +480,10 @@ def process():
         for d in udirs.values():
             if len(d.metas) == 1:
                 print(
-                    "touch -r", quote(str(idir / d.metas[0])), quote(str(dest / d.name))
+                    "touch -r",
+                    quote(str(idir / d.metas[0])),
+                    quote(str(dest / d.name)),
+                    file=out,
                 )
             elif len(d.metas) > 1:
                 print(
