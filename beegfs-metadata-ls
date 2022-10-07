@@ -31,7 +31,7 @@ def parse_args():
     parser.add_argument("-n", "--max-files", type=int)
     parser.add_argument("-u", "--user", default="")
     parser.add_argument("-o", "--output")
-    parser.add_argument("-C", "--command", default="cp -pi")
+    parser.add_argument("-C", "--command", default="cp -n --preserve=timestamps")
     parser.add_argument("-D", "--dest-dir", default="")
     parser.add_argument("dir", nargs="?", default="")
     args = parser.parse_args()
