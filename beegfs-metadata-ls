@@ -443,7 +443,8 @@ def process():
                 if d.name in udirs:
                     udirs.pop(d.name, None)
 
-        print("#!/bin/bash -x", file=out)
+        print("#!/bin/bash", file=out)
+        print("set -x", file=out)
         for d in udirs.keys():
             print("mkdir -p", quote(str(dest / d)), file=out)
         del udirs
