@@ -1,0 +1,107 @@
+#!/usr/bin/env python3
+
+import os, sys, stat, argparse, re
+from pathlib import Path
+
+
+args = None
+maxpath = 512
+
+
+def parse_args():
+    global args
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-o", "--output")
+    parser.add_argument("-d", "--original-dir", default="/mercury/data2")
+    parser.add_argument("dir", nargs="*")
+    args = parser.parse_args()
+    print(args.dir)
+
+
+def quote(val):
+    """Quote/escape a string in a safe way for Bourne-style shells."""
+    if (
+        val == ""
+        or re.search(r"[][(){}<>;&|*?^!$`'\\\"\s]", val)
+        or val[0] == "~"
+        or re.search(r"[:=]~", val)
+    ):
+        return '"' + re.sub(r'([\\$"`])', r"\\\1", val) + '"'
+    return val
+
+
+def is_symlink(fpath):
+    try:
+        size = fpath.stat().st_size
+    except OSError:
+        return None
+    if not (size and size <= maxpath):
+        return None
+    try:
+        with open(fpath, encoding="latin-1") as f:
+            cont = f.read()
+    except OSError:
+        return None
+    if re.search(r"[\n\0]", cont):  # no \n at end!
+        return None
+    if re.search(
+        r"^(/cvmfs/|\.\./|" + args.original_dir + r"/)[^][\s(){}$'\"]+$", cont
+    ):
+        return cont
+    pcont = Path(cont)
+    target = fpath.parent / pcont
+    try:
+        exists = target.is_symlink() or target.exists()
+    except OSError:
+        exists = False
+    if exists:
+        return cont
+    if pcont.is_absolute():
+        return None
+    for d in target.parents:
+        try:
+            isdir = d.is_dir()
+        except OSError:
+            isdir = False
+        if isdir:
+            return None
+        if is_symlink(d):
+            return cont
+    return None
+
+
+def process():
+    global maxpath
+    parse_args()
+
+    if args.output is not None:
+        out = open(args.output, "w")
+        os.chmod(
+            out.fileno(),
+            os.stat(out.fileno()).st_mode
+            | (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH),
+        )
+    else:
+        out = sys.stdout
+
+    print("#!/bin/bash", file=out)
+    print("set -x", file=out)
+
+    for d in args.dir if args.dir else [""]:
+        idir = Path(d)
+        maxpath = os.pathconf(idir, "PC_PATH_MAX")
+        for root, dirs, files in os.walk(idir):
+            proot = Path(root)
+            for name in files:
+                fpath = proot / name
+                cont = is_symlink(fpath)
+                if cont:
+                    print("ln -nfs", quote(cont), quote(str(fpath)), file=out)
+
+    if args.output is not None:
+        out.close()
+
+    return 0
+
+
+exit(process())
