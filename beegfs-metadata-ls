@@ -498,5 +498,6 @@ def process():
     if args.output is not None:
         out.close()
 
+    return 0
 
 exit(process())
