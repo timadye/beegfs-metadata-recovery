@@ -21,7 +21,7 @@ def quote(val):
     """Quote/escape a string in a safe way for Bourne-style shells."""
     if (
         val == ""
-        or re.search(r"[][(){}<>;&|*?^!$`'\\\"\s]", val)
+        or re.search(r"[][(){}<>;&|*?^!$`'\\\"\0- \x7F-\xFF]", val)
         or val[0] == "~"
         or re.search(r"[:=]~", val)
     ):
@@ -44,7 +44,8 @@ def is_symlink(fpath):
     if re.search(r"[\n\0]", cont):  # no \n at end!
         return None
     if re.search(
-        r"^(/cvmfs/|\.\./|" + args.original_dir + r"/)[^][\s(){}$'\"]+$", cont
+        r"^(/cvmfs/|\.\./|" + args.original_dir + r"/)[^][(){}<>;&|*?^!$`'\\\"\0- \x7F-\xFF]+$",
+        cont,
     ):
         return cont
     pcont = Path(cont)
@@ -63,7 +64,7 @@ def is_symlink(fpath):
         except OSError:
             isdir = False
         if isdir:
-            return None
+            return None  # the parent directory exists, so a recovered symlink can't explain why the target doesn't exist
         if is_symlink(d):
             return cont
     return None

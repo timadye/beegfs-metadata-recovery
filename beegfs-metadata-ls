@@ -53,7 +53,7 @@ def quote(val):
     """Quote/escape a string in a safe way for Bourne-style shells."""
     if (
         val == ""
-        or re.search(r"[][(){}<>;&|*?^!$`'\\\"\s]", val)
+        or re.search(r"[][(){}<>;&|*?^!$`'\\\"\0- \x7F-\xFF]", val)
         or val[0] == "~"
         or re.search(r"[:=]~", val)
     ):
