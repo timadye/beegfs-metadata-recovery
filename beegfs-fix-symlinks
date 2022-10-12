@@ -15,7 +15,6 @@ def parse_args():
     parser.add_argument("-d", "--original-dir", default="/mercury/data2")
     parser.add_argument("dir", nargs="*")
     args = parser.parse_args()
-    print(args.dir)
 
 
 def quote(val):
