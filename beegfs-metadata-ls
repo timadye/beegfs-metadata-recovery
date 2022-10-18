@@ -1,12 +1,19 @@
 #!/usr/bin/env python3
 
-import sys, os, stat, argparse, re, itertools, collections
+import sys, os, stat, pwd, argparse, re, itertools, collections
 from collections import defaultdict, namedtuple
 from pathlib import Path
 
+
+class Uids(set):
+    def __init__(self, s=set(), direct=False):
+        self.update(s)
+        self.direct = direct
+
+
 Dir = namedtuple(
-    "Dir", ["name", "tag", "metas", "nosub", "parent"]
-)  # defaults=["", "", [], False]  # py3.7
+    "Dir", ["name", "tag", "metas", "nosub", "parent", "uids"]
+)  # defaults=["", "", [], False, None, Uids]  # py3.7
 File = namedtuple(
     "File", ["dir", "name", "tags", "chunks", "empty", "metas"]
 )  # defaults=[Dir(), "", [], [], False, []] # py3.7
@@ -28,6 +35,7 @@ def parse_args():
     parser.add_argument("-m", "--missing-chunks", action="store_true")
     parser.add_argument("-t", "--tags", action="store_true")
     parser.add_argument("-M", "--metadata", action="store_true")
+    parser.add_argument("-O", "--chown", action="store_true")
     parser.add_argument("-n", "--max-files", type=int)
     parser.add_argument("-u", "--user", default="")
     parser.add_argument("-o", "--output")
@@ -96,7 +104,16 @@ def lsdirs(index):
         subs = tags.get(tag)
         if subs is None:
             if (name + "/").startswith(select):
-                return [Dir(name=name, tag=tag, metas=metas, parent=parent, nosub=True)]
+                return [
+                    Dir(
+                        name=name,
+                        tag=tag,
+                        metas=metas,
+                        parent=parent,
+                        nosub=True,
+                        uids=Uids(),
+                    )
+                ]
             else:
                 return []
         named = name + ("/" if name else "")
@@ -110,12 +127,15 @@ def lsdirs(index):
                         metas=metas,
                         parent=parent,
                         nosub=True,
+                        uids=Uids(),
                     )
                 ]
             else:
                 return []
         else:
-            this = Dir(name=name, tag=tag, metas=metas, parent=parent, nosub=False)
+            this = Dir(
+                name=name, tag=tag, metas=metas, parent=parent, nosub=False, uids=Uids()
+            )
             if (name + "/").startswith(select):
                 dirs = [this]
             else:
@@ -180,7 +200,14 @@ def lsdirs(index):
             meta = re.sub(r"\n", " ", meta)
             stag, sdir = meta.split("/")[-2:]
             tags[stag].append(
-                Dir(name=sdir, tag=tag, metas=[meta], parent=None, nosub=False)
+                Dir(
+                    name=sdir,
+                    tag=tag,
+                    metas=[meta],
+                    parent=None,
+                    nosub=False,
+                    uids=Uids(),
+                )
             )
 
     dirs = lsdir(
@@ -451,22 +478,33 @@ def process():
 
         links = []
         for f in cfiles:
-            needsuf = sum([len(c.stors) for c in f.chunks]) > 1
             needsuf = len(f.chunks) > 1 or sum([len(c.stors) for c in f.chunks]) > 1
             for c in f.chunks:
                 if c.stors:
                     for s in c.stors:
-                        links.append((dirfile(f.dir.name, f.name), s, needsuf))
+                        links.append((dirfile(f.dir.name, f.name), s, needsuf, f.dir))
                 else:
-                    links.append((dirfile(f.dir.name, f.name), c.meta, needsuf))
+                    links.append((dirfile(f.dir.name, f.name), c.meta, needsuf, f.dir))
 
-        for df, s, needsuf in nodup(links):
-            print(
-                args.command,
-                quote(str(idir / s)),
-                quote(str(dest / (df + ("." + s.split("/")[0] if needsuf else "")))),
-                file=out,
-            )
+        uids = {}
+        for df, s, needsuf, d in nodup(links, lambda l: l[:2]):
+            fname = quote(str(dest / (df + ("." + s.split("/")[0] if needsuf else ""))))
+            print(args.command, quote(str(idir / s)), fname, file=out)
+            if args.chown:
+                um = re.match(r"^[^/]+/storage/chunks/u([\da-fA-F]+)/", s)
+                if um:
+                    uid = int(um.groups()[0], 16)
+                    ugid = uids.get(uid)
+                    if ugid is None:
+                        try:
+                            gid = pwd.getpwuid(uid).pw_gid
+                            ugid = f"{uid}:{gid}"
+                        except KeyError:
+                            ugid = str(uid)
+                        uids[uid] = ugid
+                    d.uids.add(uid)
+                    d.uids.direct = True
+                    print("chown -h", ugid, fname, file=out)
         del links
 
         # find all needed dirs and their parents
@@ -475,10 +513,37 @@ def process():
             d = f.dir
             udirs.setdefault(d.name, d)
             while d.parent:
+                if d.uids and not d.parent.uids.direct:
+                    d.parent.uids.update(d.uids)
                 d = d.parent
                 udirs.setdefault(d.name, d)
 
         for d in udirs.values():
+            if args.chown:
+                if not d.uids:
+                    dp = d
+                    while dp.parent:
+                        dp = dp.parent
+                        if dp.uids:
+                            d.uids.update(dp.uids)
+                            break
+                if d.uids:
+                    if len(d.uids) > 1:
+                        err(
+                            "dir",
+                            d.name,
+                            "multiple uids:",
+                            " ".join([uids[u] for u in d.uids]),
+                        )
+                    print(
+                        "chown -h",
+                        uids[next(iter(d.uids))],
+                        quote(str(dest / d.name)),
+                        file=out,
+                    )
+                else:
+                    err("dir", d.name, "has no UID")
+
             if len(d.metas) == 1:
                 print(
                     "touch -r",
@@ -499,5 +564,6 @@ def process():
         out.close()
 
     return 0
+
 
 exit(process())
