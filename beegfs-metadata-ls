@@ -164,7 +164,7 @@ def lsdirs(index):
                 dsubs.pop(d, None)
             for d, mm in dsubs.items():
                 if len(mm) > 1:
-                    err(f"directory {named}{d} has multiple tags:", " ".join(mm))
+                    info(f"directory {named}{d} has multiple tags:", " ".join(mm))
             return dirs
 
     tags = defaultdict(list)
@@ -303,7 +303,7 @@ def lsfiles(index, dirs):
             uextend(last.chunks, f.chunks, lambda c: c.tag)
     for f in ufiles:
         if len(f.tags) > 1:
-            err(
+            info(
                 "file",
                 dirfile(f.dir.name, f.name),
                 "has multiple tags:",
