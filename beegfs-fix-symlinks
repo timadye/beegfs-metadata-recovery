@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 
-import os, sys, stat, argparse, re
+import os, sys, stat, pwd, argparse, re, datetime
 from pathlib import Path
 
 
 args = None
 maxpath = 512
+ns = 1000000000
+uids = {}
 
 
 def parse_args():
@@ -13,6 +15,7 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("-o", "--output")
     parser.add_argument("-d", "--original-dir", default="/mercury/data2")
+    parser.add_argument("-O", "--chown", action="store_true")
     parser.add_argument("dir", nargs="*")
     args = parser.parse_args()
 
@@ -31,9 +34,10 @@ def quote(val):
 
 def is_symlink(fpath):
     try:
-        size = fpath.stat().st_size
+        st = fpath.stat()
     except OSError:
         return None
+    size = st.st_size
     if not (size and size <= maxpath):
         return None
     try:
@@ -44,10 +48,12 @@ def is_symlink(fpath):
     if re.search(r"[\n\0]", cont):  # no \n at end!
         return None
     if re.search(
-        r"^(/cvmfs/|\.\./|" + args.original_dir + r"/)[^][(){}<>;&|*?^!$`'\\\"\0- \x7F-\xFF]+$",
+        r"^(/cvmfs/|\.\./|"
+        + args.original_dir
+        + r"/)[^][(){}<>;&|*?^!$`'\\\"\0- \x7F-\xFF]+$",
         cont,
     ):
-        return cont
+        return cont, st
     pcont = Path(cont)
     target = fpath.parent / pcont
     try:
@@ -55,7 +61,7 @@ def is_symlink(fpath):
     except OSError:
         exists = False
     if exists:
-        return cont
+        return cont, st
     if pcont.is_absolute():
         return None
     for d in target.parents:
@@ -66,8 +72,33 @@ def is_symlink(fpath):
         if isdir:
             return None  # the parent directory exists, so a recovered symlink can't explain why the target doesn't exist
         if is_symlink(d):
-            return cont
+            return cont, st
     return None
+
+
+def modtime(st):
+    t = st.st_mtime_ns
+    return "{}.{:09d}".format(
+        datetime.datetime.fromtimestamp(t // ns).isoformat(), t % ns
+    )
+
+
+def uid(fpath, st):
+    if fpath.is_symlink():
+        um = re.search(r"/storage/chunks/u([\da-fA-F]+)/", os.readlink(str(fpath)))
+        if um:
+            uid = int(um.groups()[0], 16)
+            ugid = uids.get(uid)
+            if ugid is not None:
+                return ugid
+            try:
+                gid = pwd.getpwuid(uid).pw_gid
+                ugid = f"{uid}:{gid}"
+            except KeyError:
+                ugid = str(uid)
+            uids[uid] = ugid
+            return ugid
+    return f"{st.st_uid}:{st.st_gid}"
 
 
 def process():
@@ -94,14 +125,14 @@ def process():
             proot = Path(root)
             for name in files:
                 fpath = proot / name
-                cont = is_symlink(fpath)
-                if cont:
+                cs = is_symlink(fpath)
+                if cs:
+                    cont, st = cs
                     lnk = quote(str(fpath))
-                    fxlnk = quote(str(fpath)+".fixln")
-                    print("mv -n", lnk, fxlnk, "&& \\", file=out)
-                    print("ln -nfs", quote(cont), lnk, "&& \\", file=out)
-                    print("touch -hr", fxlnk, lnk, "&& \\", file=out)
-                    print("rm -f", fxlnk, file=out)
+                    print("ln -nfs", quote(cont), lnk, file=out)
+                    if args.chown:
+                        print("chown -h", uid(fpath, st), lnk, file=out)
+                    print("touch -hd", modtime(st), lnk, file=out)
 
     if args.output is not None:
         out.close()
