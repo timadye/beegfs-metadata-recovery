@@ -96,7 +96,12 @@ def process():
                 fpath = proot / name
                 cont = is_symlink(fpath)
                 if cont:
-                    print("ln -nfs", quote(cont), quote(str(fpath)), file=out)
+                    lnk = quote(str(fpath))
+                    fxlnk = quote(str(fpath)+".fixln")
+                    print("mv -n", lnk, fxlnk, "&& \\", file=out)
+                    print("ln -nfs", quote(cont), lnk, "&& \\", file=out)
+                    print("touch -hr", fxlnk, lnk, "&& \\", file=out)
+                    print("rm -f", fxlnk, file=out)
 
     if args.output is not None:
         out.close()
