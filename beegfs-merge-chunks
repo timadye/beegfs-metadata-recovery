@@ -1,0 +1,125 @@
+#!/usr/bin/env python3
+
+import os, sys, stat, argparse, re, datetime
+from pathlib import Path
+from collections import defaultdict, namedtuple
+
+
+args = None
+ns = 1000000000
+default_block_size = 0x80000
+
+
+File = namedtuple("File", ["name", "file", "stat"])
+
+
+def parse_args():
+    global args
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-v", "--verbose", action="store_true")
+    parser.add_argument("-q", "--quiet", action="store_true")
+    parser.add_argument(
+        "-o",
+        "--output",
+        help="output file or directory (default writes to same location as inputs)",
+    )
+    parser.add_argument("-B", "--block-size", type=int, default=default_block_size)
+    parser.add_argument("-O", "--keep-order", action="store_true")
+    parser.add_argument("-f", "--force-overwrite", action="store_true")
+    parser.add_argument("chunks", nargs="+")
+    args = parser.parse_args()
+
+
+def err(*fargs, **fkwargs):
+    if args.quiet:
+        return
+    print(*fargs, file=sys.stderr, **fkwargs)
+
+
+def info(*fargs, **fkwargs):
+    if not args.verbose:
+        return
+    print(*fargs, file=sys.stderr, **fkwargs)
+
+
+def nodup(lst, key=None):
+    if key is None:
+        return dict.fromkeys(lst).keys()
+    else:
+        return {key(e): e for e in lst}.values()
+
+
+def modtime(st):
+    t = st.st_mtime_ns
+    return "{}.{:09d}".format(
+        datetime.datetime.fromtimestamp(t // ns).isoformat(), t % ns
+    )
+
+
+def merge(infiles, outname):
+    files = []
+    for fname in infiles:
+        fin = open(fname, "rb")
+        files.append(File(name=fname, file=fin, stat=os.stat(fin.fileno())))
+    if not args.keep_order:
+        files.sort(key=lambda f: (-f.stat.st_size, f.stat.st_mtime_ns))
+
+    outsize = sum([f.stat.st_size for f in files])
+    if args.verbose:
+        info("Create", outname, "from", len(files), "chunks, total size", outsize)
+        for i, f in enumerate(files):
+            info(f"{i}: {f.file.name} 0x{f.stat.st_size:08x} {modtime(f.stat)}")
+
+    with open(outname, "wb" if args.force_overwrite else "xb") as out:
+        while True:
+            nread = 0
+            for f in files:
+                data = f.file.read(args.block_size)
+                if not data:
+                    continue
+                nread += 1
+                out.write(data)
+            if not nread:
+                break
+
+        out.flush()
+        sz = os.stat(out.fileno()).st_size
+        if sz != outsize:
+            err("output file", outname, "size", sz, "should be", outsize)
+
+        os.utime(
+            out.fileno(),
+            ns=(
+                max([f.stat.st_atime_ns for f in files]),
+                max([f.stat.st_mtime_ns for f in files]),
+            ),
+        )
+
+    for f in files:
+        f.file.close()
+
+
+def process():
+    parse_args()
+
+    chunks = defaultdict(list)
+    isdir = args.output is not None and Path(args.output).is_dir()
+    for f in args.chunks:
+        outname = re.sub(r"\.mercury\d\d\d$", "", f)
+        if isdir:
+            outname = str(Path(args.output) / Path(outname).name)
+        chunks[outname].append(f)
+
+    if args.output is not None and not isdir:
+        if len(chunks) != 1:
+            err("multiple output files with --output:", " ".join(chunks.keys()))
+            return 1
+        else:
+            chunks = {args.output: list(chunks.values())[0]}
+
+    for outname, infiles in chunks.items():
+        merge(infiles, outname)
+    return 0
+
+
+exit(process())
