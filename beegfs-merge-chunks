@@ -59,18 +59,27 @@ def modtime(st):
 def merge(infiles, outname):
     files = []
     for fname in infiles:
-        fin = open(fname, "rb")
+        try:
+            fin = open(fname, "rb")
+        except IOError as e:
+            err(e)
+            return 1
         files.append(File(name=fname, file=fin, stat=os.stat(fin.fileno())))
     if not args.keep_order:
         files.sort(key=lambda f: (-f.stat.st_size, f.stat.st_mtime_ns))
 
     outsize = sum([f.stat.st_size for f in files])
+    err("Create", outname, "from", len(files), "chunks,", outsize, "bytes")
     if args.verbose:
-        info("Create", outname, "from", len(files), "chunks, total size", outsize)
         for i, f in enumerate(files):
             info(f"{i}: {f.file.name} 0x{f.stat.st_size:08x} {modtime(f.stat)}")
 
-    with open(outname, "wb" if args.force_overwrite else "xb") as out:
+    try:
+        out = open(outname, "wb" if args.force_overwrite else "xb")
+    except IOError as e:
+        print(e)
+        return 2
+    with out:
         while True:
             nread = 0
             for f in files:
@@ -113,12 +122,14 @@ def process():
     if args.output is not None and not isdir:
         if len(chunks) != 1:
             err("multiple output files with --output:", " ".join(chunks.keys()))
-            return 1
+            return 3
         else:
             chunks = {args.output: list(chunks.values())[0]}
 
     for outname, infiles in chunks.items():
-        merge(infiles, outname)
+        ret = merge(infiles, outname)
+        if ret:
+            return ret
     return 0
 
 
