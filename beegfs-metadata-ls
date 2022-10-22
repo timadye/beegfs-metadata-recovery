@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 
-import sys, os, stat, pwd, argparse, re, itertools, collections
+import sys, os, stat, pwd, grp, datetime, argparse, re, itertools, collections
 from collections import defaultdict, namedtuple
 from pathlib import Path
+from array import array
 
 
 class Uids(set):
@@ -17,7 +18,9 @@ Dir = namedtuple(
 File = namedtuple(
     "File", ["dir", "name", "tags", "chunks", "empty", "metas"]
 )  # defaults=[Dir(), "", [], [], False, []] # py3.7
-Chunk = namedtuple("Chunk", ["tag", "meta", "stors"])  # defaults=["", "", []]  # py3.7
+Chunk = namedtuple(
+    "Chunk", ["tag", "meta", "stors", "xattr"]
+)  # defaults=["", "", [], None]  # py3.7
 
 args = None
 
@@ -36,13 +39,22 @@ def parse_args():
     parser.add_argument("-t", "--tags", action="store_true")
     parser.add_argument("-M", "--metadata", action="store_true")
     parser.add_argument("-O", "--chown", action="store_true")
+    parser.add_argument("-x", "--xattr", action="store_true")
+    parser.add_argument("-X", "--xattr-dir")
     parser.add_argument("-n", "--max-files", type=int)
+    parser.add_argument("-r", "--root_dir", default="")
     parser.add_argument("-u", "--user", default="")
     parser.add_argument("-o", "--output")
     parser.add_argument("-C", "--command", default="cp -n --preserve=timestamps")
     parser.add_argument("-D", "--dest-dir", default="")
     parser.add_argument("dir", nargs="?", default="")
     args = parser.parse_args()
+    if args.xattr and args.xattr_dir is None:
+        args.xattr_dir = args.dir
+    elif args.xattr_dir is not None and not args.xattr:
+        args.xattr = True
+    if args.xattr:
+        args.xattr_dir = Path(args.xattr_dir)
 
 
 def err(*fargs, **fkwargs):
@@ -78,12 +90,9 @@ def dirfile(dir, file):
 
 def nodup(lst, key=None):
     if key is None:
-        return {e: None for e in lst}.keys()
+        return dict.fromkeys(lst).keys()
     else:
-        dup = {}
-        for e in lst:
-            dup.setdefault(key(e), e)
-        return dup.values()
+        return {key(e): e for e in lst}.values()
 
 
 def uextend(lst, ext, key=None):
@@ -97,6 +106,75 @@ def uextend(lst, ext, key=None):
             if key(e) not in k:
                 lst.append(e)
                 k.append(key(e))
+
+
+def getxattr(meta):
+    try:
+        return os.getxattr(args.xattr_dir / meta, "user.fhgfs")
+    except IOError:
+        return b""
+
+
+def filemode(xattr):
+    if len(xattr) < 0x16:
+        return ""
+    return stat.filemode(int.from_bytes(xattr[0x14:0x16], "little"))
+
+
+def owner(xattr):
+    if len(xattr) >= 0xB6:
+        ug = xattr[0x70:0x78]
+    elif len(xattr) >= 0x50:
+        ug = xattr[0x48:0x50]
+    else:
+        return ""
+    uid = int.from_bytes(ug[0:4], "little")
+    gid = int.from_bytes(ug[4:8], "little")
+    try:
+        uid = pwd.getpwuid(uid).pw_name
+    except KeyError:
+        uid = str(uid)
+    try:
+        gid = grp.getgrgid(gid).gr_name
+    except KeyError:
+        gid = str(gid)
+    return f"{uid}:{gid}"
+
+
+def uidgid(xattr):
+    if len(xattr) >= 0xB6:
+        ug = xattr[0x70:0x78]
+    elif len(xattr) >= 0x50:
+        ug = xattr[0x48:0x50]
+    else:
+        return None, None
+    uid = int.from_bytes(ug[0:4], "little")
+    gid = int.from_bytes(ug[4:8], "little")
+    return uid, gid
+
+
+def time(t):
+    return datetime.datetime.fromtimestamp(t).isoformat() if t else ""
+
+
+def times(xattr):
+    if len(xattr) >= 0xB6:
+        ug = xattr[0x40:0x60]
+    elif len(xattr) >= 0x50:
+        ug = xattr[0x18:0x38]
+    else:
+        return ""
+    if len(xattr) < 0x38:
+        return ""
+    return (
+        time(int.from_bytes(ug[0:8], "little"))
+        + " "
+        + time(int.from_bytes(ug[8:16], "little"))
+        + " "
+        + time(int.from_bytes(ug[16:24], "little"))
+        + " "
+        + time(int.from_bytes(ug[24:32], "little"))
+    )
 
 
 def lsdirs(index):
@@ -215,7 +293,7 @@ def lsdirs(index):
         tag="root",
         metas=[],
         top="root",
-        select=args.user + "/" if args.user else "",
+        select=args.root_dir + "/" if args.root_dir else "",
     )
     return nodup(dirs, lambda d: (d.name, d.tag))  # unique tag/dir
 
@@ -246,7 +324,9 @@ def lsfiles2(index, dirs):
             tag, meta = w
             ftag, fname = meta.split("/")[-2:]
             if ftag == "#fSiDs#":
-                chunks[tag].append(Chunk(tag=fname, meta=meta, stors=[]))
+                chunks[tag].append(
+                    Chunk(tag=fname, meta=meta, stors=[], xattr=array("B"))
+                )
             else:
                 dd = dtag.get(ftag)
                 if dd is not None:
@@ -302,6 +382,12 @@ def lsfiles(index, dirs):
             uextend(last.metas, f.metas)
             uextend(last.chunks, f.chunks, lambda c: c.tag)
     for f in ufiles:
+        if args.xattr:
+            # read xattr only for files in a selected directory
+            for c in f.chunks:
+                if not c.xattr:
+                    c.xattr.frombytes(getxattr(c.meta))
+
         if len(f.tags) > 1:
             info(
                 "file",
@@ -314,6 +400,15 @@ def lsfiles(index, dirs):
 
 
 def lschunks(index, files):
+    re_uid = None
+    if args.user is not None:
+        try:
+            pw = pwd.getpwnam(args.user)
+        except KeyError:
+            err("user", args.user, "not found")
+        else:
+            re_uid = re.compile(r"^[^/]+/storage/chunks/u" + f"{pw.pw_uid:X}/")
+
     ctags = defaultdict(list)
     empty = []
     for f in files:
@@ -345,6 +440,8 @@ def lschunks(index, files):
                 err(f"{index}:{n}: bad format:", chunk)
                 continue
             ctag = chunk.split("/")[-1]
+            if re_uid is not None and not re.match(re_uid, chunk):
+                continue
             ff = ctags.get(ctag)
             if ff is not None:
                 for f in ff:
@@ -369,7 +466,12 @@ def lschunks(index, files):
             for c in f.chunks:
                 n += len(c.stors)
                 if len(c.stors) == 0:
-                    err("file", dirfile(f.dir.name, f.name), f"chunk {c.tag} not found")
+                    if args.user is None:
+                        err(
+                            "file",
+                            dirfile(f.dir.name, f.name),
+                            f"chunk {c.tag} not found",
+                        )
                 elif len(c.stors) > 1:
                     info(
                         "multiple storage instances for file",
@@ -417,7 +519,27 @@ def process():
             print(
                 dirfile(f.dir.name, f.name)
                 + ("\t" + " ".join(f.tags) if args.tags else "")
-                + ("\t" + " ".join(f.metas) if args.metadata else ""),
+                + ("\t" + " ".join(f.metas) if args.metadata else "")
+                + (
+                    "\t" + " ".join(nodup((c.tag for c in f.chunks)))
+                    if args.tags
+                    else ""
+                )
+                + (
+                    "\t" + " ".join(nodup(c.meta for c in f.chunks))
+                    if args.metadata
+                    else ""
+                )
+                + (
+                    "\t"
+                    + " ".join(
+                        filemode(c.xattr) + " " + owner(c.xattr) + " " + times(c.xattr)
+                        for c in f.chunks
+                        if c.xattr
+                    )
+                    if args.xattr
+                    else ""
+                ),
                 file=out,
             )
 
@@ -444,6 +566,16 @@ def process():
                 + (
                     "\t" + " ".join(nodup(c.meta for c in f.chunks))
                     if args.metadata
+                    else ""
+                )
+                + (
+                    "\t"
+                    + " ".join(
+                        stat.filemode(int.from_bytes(c.xattr[0x14:0x16], "little"))
+                        for c in f.chunks
+                        if c.xattr
+                    )
+                    if args.xattr
                     else ""
                 )
                 + "\t"
