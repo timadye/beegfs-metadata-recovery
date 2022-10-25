@@ -47,7 +47,10 @@ server_decode = {
     0x044D: "mercury011",
 }
 
+maxpath = 512
 args = None
+uids = {}
+gids = {}
 
 
 def parse_args():
@@ -68,15 +71,23 @@ def parse_args():
     parser.add_argument("-T", "--timestamps", action="store_true")
     parser.add_argument("-S", "--sizes", action="store_true")
     parser.add_argument("-H", "--hexdump", action="store_true")
+    parser.add_argument("-j", "--no-merge", action="store_true")
     parser.add_argument("-X", "--xattr-dir")
     parser.add_argument("-n", "--max-files", type=int)
     parser.add_argument("-r", "--root_dir", default="")
-    parser.add_argument("-u", "--user", default="")
+    parser.add_argument("-u", "--user")
     parser.add_argument("-o", "--output")
     parser.add_argument("-C", "--command", default="cp -n --preserve=timestamps")
+    parser.add_argument(
+        "--merge-command", default=Path(sys.argv[0]).parent / "beegfs-merge-chunks"
+    )
     parser.add_argument("-D", "--dest-dir", default="")
     parser.add_argument("dir", nargs="?", default="")
     args = parser.parse_args()
+    if not (
+        args.list_directories or args.list_files or args.list_chunks or args.script
+    ):
+        args.script = True
     if (args.hexdump or args.xattr_dir) and not args.xattr:
         args.xattr = True
     if args.xattr and args.xattr_dir is None:
@@ -192,84 +203,103 @@ def hexchunks(seq, size):
 def getxattr(meta):
     try:
         return os.getxattr(args.xattr_dir / meta, "user.fhgfs")
-    except IOError:
+    except IOError as e:
+        err(e)
         return b""
 
 
-def getint(xattr, l, h, i=0):
-    return (
-        int.from_bytes(xattr[i + l : i + h], "little") if i + h <= len(xattr) else None
-    )
-
-
 def xattr_offset(lxattr):
-    # xattrlens = [140, 142, 144, 160, 162, 182, 192, 202]
-    if lxattr >= 0xCA:
-        i = 0x28
-        j = 0x3C
-    elif lxattr >= 0xC0:
-        i = 0x20
-        j = 0x34
-    elif lxattr >= 0xB6:
-        i = 0x28
-        j = 0x28
-    elif lxattr >= 0xA0:
-        i = 0x00
-        j = 0x14
-    elif lxattr >= 0x90:
-        i = 0x00
-        j = 0x04
+    # xattrlens = [140, 142, 144, 160, 162, 172, 176, 182, 192, 202]
+    if lxattr >= 0xCA:  # 202
+        return 0x28, 0x3C
+    elif lxattr >= 0xC0:  # 192
+        return 0x20, 0x34
+    elif lxattr >= 0xB6:  # 182
+        return 0x28, 0x28
+    elif lxattr >= 0xB0:  # 176
+        return 0x20, 0x24
+    elif lxattr >= 0xAC:  # 172
+        return 0x20, 0x20
+    elif lxattr >= 0xA0:  # 160
+        return 0x00, 0x14
+    elif lxattr >= 0x90:  # 144
+        return 0x00, 0x04
     else:
-        i = 0x00
-        j = 0x00
-    return i, j
+        return 0x00, 0x00
 
 
-def getservers(xattr, filename):
+def getservers(xattr, f, minservers=2):
     i, j = xattr_offset(len(xattr))
+    if len(xattr) < j + 0x7E + 2 * minservers:
+        err(f"file {filename} xattr length {len(xattr)} is too short")
+        return {}
     # tag = str(xattr[j + 0x54 : j + 0x64]).rtrim("\0")
-    server_codes = [getint(xattr, a, a + 2, j) for a in range(0x7E, len(xattr)-j-2, 2)]
+    server_codes = [
+        int.from_bytes(xattr[a : a + 2], "little")
+        for a in range(j + 0x7E, len(xattr) - 1, 2)
+    ]
     while server_codes and server_codes[-1] == 0:
         server_codes.pop()
     servers = {server_decode.get(s, ""): i for i, s in enumerate(server_codes)}
     if any([not s for s in servers.keys()]):
         err(
-            f"file {filename} bad server codes:",
+            f"file {dirfile(f.dir.name, f.name)} bad server codes:",
             " ".join(f"{x:02X}" for x in server_codes if x is not None),
         )
     return servers
 
 
 def getstat(xattr, filename):
+    def getint(l, h, i=0):
+        return int.from_bytes(xattr[i + l : i + h], "little")
+
     i, j = xattr_offset(len(xattr))
+    if len(xattr) < i + 0x50:
+        err(f"file {filename} xattr length {len(xattr)} is too short")
+        return None
     st = StatResult(
-        st_mode=getint(xattr, 0x14, 0x18),
-        st_mtime=getint(xattr, 0x18, 0x20, i),
-        st_ctime=getint(xattr, 0x20, 0x28, i),
-        st_atime=getint(xattr, 0x28, 0x30, i),
-        st_btime=getint(xattr, 0x30, 0x38, i),
-        st_size=getint(xattr, 0x38, 0x40, i),
-        st_nlink=getint(xattr, 0x40, 0x48, i),
-        st_uid=getint(xattr, 0x48, 0x4C, i),
-        st_gid=getint(xattr, 0x4C, 0x50, i),
+        st_mode=getint(0x14, 0x18),
+        st_mtime=getint(0x18, 0x20, i),  # not sure if we swapped m/c/a/btime
+        st_ctime=getint(0x20, 0x28, i),
+        st_atime=getint(0x28, 0x30, i),
+        st_btime=getint(0x30, 0x38, i),
+        st_size=getint(0x38, 0x40, i),
+        st_nlink=getint(0x40, 0x48, i),  # just a guess, since this is always 1
+        st_uid=getint(0x48, 0x4C, i),
+        st_gid=getint(0x4C, 0x50, i),
         # st_unknown=getint(0x50, 0x54, i),
     )
     if st.st_mode != (stat.S_IFMT(st.st_mode) | stat.S_IMODE(st.st_mode)) or not (
         stat.S_ISREG(st.st_mode) or stat.S_ISLNK(st.st_mode) or stat.S_ISDIR(st.st_mode)
     ):
         err(f"file {filename} bad mode: 0{st.st_mode:o}")
-    ugerr = False
-    try:
-        pwd.getpwuid(st.st_uid)
-    except KeyError:
-        ugerr = True
-    try:
-        grp.getgrgid(st.st_gid)
-    except KeyError:
-        ugerr = True
-    if ugerr:
+    if getpwuid(st.st_uid) is None or getgrgid(st.st_gid) is None:
         err(f"file {filename} bad UID:GID {st.st_uid}:{st.st_gid}")
     return st
+
+
+def getpwuid(uid):
+    pw = uids.get(uid)
+    if pw is not None:
+        return pw
+    try:
+        pw = pwd.getpwuid(uid)
+    except KeyError:
+        return None
+    uids[uid] = pw
+    return pw
+
+
+def getgrgid(gid):
+    gr = gids.get(gid)
+    if gr is not None:
+        return gr
+    try:
+        gr = grp.getgrgid(gid)
+    except KeyError:
+        return None
+    gids[gid] = gr
+    return gr
 
 
 def filemode(st):
@@ -280,14 +310,12 @@ def owner(st):
     uid, gid = st.st_uid, st.st_gid
     if uid is None or gid is None:
         return ""
-    try:
-        uid = pwd.getpwuid(uid).pw_name
-    except KeyError:
-        uid = str(uid)
-    try:
-        gid = grp.getgrgid(gid).gr_name
-    except KeyError:
-        gid = str(gid)
+    pw = getpwuid(uid)
+    if pw is not None:
+        uid = pw.pw_name
+    gr = getgrgid(gid)
+    if gr is not None:
+        gid = gr.gr_name
     return f"{uid}:{gid}"
 
 
@@ -306,43 +334,52 @@ def times(st):
     )
 
 
-def list_stor(f, info=False):
+def list_stor(f, info=False, abs=True):
+    fname = dirfile(f.dir.name, f.name)
     files = [s for s in nodup(s for c in f.chunks for s in c.stors)]
-    unsorted = True
-    if args.xattr and len(files) >= 2 and f.chunks[0].xattr:
-        servers = getservers(f.chunks[0].xattr, dirfile(f.dir.name, f.name))
+    unsorted = len(files) > 1
+    if args.xattr and unsorted and f.chunks[0].xattr:
+        servers = getservers(f.chunks[0].xattr, f)
         stfiles = [FileStat(s, servers.get(s.split("/")[0], -1)) for s in files]
         bad = [fs.name for fs in stfiles if fs.stat == -1]
         if bad:
             err(
-                f"file {dirfile(f.dir.name, f.name)} no xattr for servers",
+                f"file {fname} no xattr for servers",
                 " ".join(bad),
             )
         stfiles.sort(key=lambda fs: fs.stat)
         unsorted = False
         files = [s.name for s in stfiles]
-        if not info:
-            return files
-    if args.sizes:
+    if args.sizes and (info or unsorted or args.xattr):
         idir = Path(args.dir)
         stfiles = [filestat(idir, s) for s in files]
         if unsorted:
             stfiles.sort(key=lambda f: (-f.stat.st_size, f.stat.st_mtime_ns))
+            files = [s.name for s in stfiles]
+        sz = sum(fs.stat.st_size for fs in stfiles)
+        if args.xattr:
+            if f.chunks:
+                st = getstat(f.chunks[0].xattr, fname)
+                szstor = st.st_size if st else None
+            else:
+                szstor = 0
+            if szstor is not None and szstor != sz:
+                err(f"file {fname} size should be {szstor}, but is {sz} on disk")
         if info:
-            sz = sum(fs.stat.st_size for fs in stfiles)
             return [
                 f"{fs.name} ({fs.stat.st_size},0x{fs.stat.st_size:X})" for fs in stfiles
             ] + ([f"(={sz},0x{sz:X})"] if len(stfiles) > 1 else [])
-        files = [s.name for s in stfiles]
-    if args.metadata:
-        return files
+    if abs:
+        return [str(Path(args.dir) / s) for s in files]
     else:
-        return [Path(args.dir) / s for s in files]
+        return files
 
 
 def list_metadata(f):
     def statinfo(xattr):
         st = getstat(xattr, dirfile(f.dir.name, f.name))
+        if not st:
+            return ""
         return (
             filemode(st)
             + " "
@@ -470,7 +507,9 @@ def lsdirs(index):
         for line, n in lines:
             flds = line.split(" ", 1)
             if not (len(flds) == 2 and "/" not in flds[0] and "/" in flds[-1]):
-                err(f"{index}:{n}: bad format:", re.sub(r"\n", " ", line))
+                info(
+                    f"{index}:{n}: bad format [known issue]:", re.sub(r"\n", " ", line)
+                )
                 continue
             tag, meta = flds
             meta = re.sub(r"\n", " ", meta)
@@ -719,7 +758,7 @@ def list_chunks(cfiles, out):
         print(
             str(dest / dirfile(f.dir.name, f.name))
             + "\t"
-            + " ".join(list_stor(f, info=True))
+            + " ".join(list_stor(f, info=True, abs=not args.metadata))
             + ("\t" + " ".join(nodup((c.tag for c in f.chunks))) if args.tags else "")
             + list_metadata(f),
             file=out,
@@ -744,36 +783,76 @@ def list_script(cfiles, out):
         print("mkdir -p", quote(str(dest / d)), file=out)
     del udirs
 
-    links = []
+    files = []
     for f in cfiles:
-        needsuf = len(f.chunks) > 1 or sum([len(c.stors) for c in f.chunks]) > 1
-        for c in f.chunks:
-            if c.stors:
-                for s in c.stors:
-                    links.append((dirfile(f.dir.name, f.name), s, needsuf, f.dir))
-            else:
-                links.append((dirfile(f.dir.name, f.name), c.meta, needsuf, f.dir))
+        fname = dirfile(f.dir.name, f.name)
+        if args.no_merge:
+            usesuf = len(f.chunks) > 1 or sum([len(c.stors) for c in f.chunks]) > 1
+            for c in f.chunks:
+                if c.stors:
+                    for i, s in enumerate(c.stors):
+                        files.append(
+                            (
+                                fname + ("." + s.split("/")[0] if usesuf else ""),
+                                i,
+                                [s],
+                                f.dir,
+                                c.xattr,
+                            )
+                        )
+                else:
+                    files.append((fname, 1, [c.meta], f.dir, c.xattr))
+        else:
+            s = list_stor(f)
+            if s:
+                files.append(
+                    (fname, 1, s, f.dir, f.chunks[0].xattr if f.chunks else b"")
+                )
+            elif f.chunks:
+                c = f.chunks[0]
+                files.append((fname, 1, [c.meta], f.dir, c.xattr))
 
-    uids = {}
-    for df, s, needsuf, d in nodup(links, lambda l: l[:2]):
-        fname = quote(str(dest / (df + ("." + s.split("/")[0] if needsuf else ""))))
-        print(args.command, quote(str(idir / s)), fname, file=out)
-        if args.chown:
-            um = re.match(r"^[^/]+/storage/chunks/u([\da-fA-F]+)/", s)
+    for df, ifile, s, d, xattr in nodup(files, lambda l: l[:2]):
+        fname = quote(str(dest / (df)))
+        islink = False
+        if args.xattr:
+            st = getstat(xattr, df)
+            if st and len(s) == 1:
+                islink = stat.S_ISLNK(st.st_mode)
+                if islink and not (st.st_size and st.st_size < maxpath):
+                    err("symlink {fname} target length is", st.st_size)
+                    islink = False
+        if islink:
+            print(f'ln -sn "$(< {quote(str(idir / s[0]))})"', quote(fname), file=out)
+        elif len(s) == 1:
+            print(args.command, quote(str(idir / s[0])), fname, file=out)
+        else:
+            print(
+                args.merge_command,
+                "-o",
+                fname,
+                " ".join([quote(ss) for ss in s]),
+                file=out,
+            )
+        if args.xattr and st:
+            if not islink:
+                print(
+                    f"[ -h {quote(fname)} ] || \\\nchmod 0{stat.S_IMODE(st.st_mode):o}",
+                    quote(fname),
+                    file=out,
+                )
+            if args.chown:
+                print("chown -h", f"{st.st_uid}:{st.st_gid}", fname, file=out)
+        if args.chown and not args.xattr:
+            um = re.match(r"^[^/]+/storage/chunks/u([\da-fA-F]+)/", s[0])
             if um:
                 uid = int(um.groups()[0], 16)
-                ugid = uids.get(uid)
-                if ugid is None:
-                    try:
-                        gid = pwd.getpwuid(uid).pw_gid
-                        ugid = f"{uid}:{gid}"
-                    except KeyError:
-                        ugid = str(uid)
-                    uids[uid] = ugid
+                pw = getpwuid(uid)
+                ugid = f"{uid}:{pw.pw_gid}" if pw is not None else f"{uid}"
                 d.uids.add(uid)
                 d.uids.direct = True
                 print("chown -h", ugid, fname, file=out)
-    del links
+    del files
 
     # find all needed dirs and their parents
     udirs = {}
@@ -787,7 +866,7 @@ def list_script(cfiles, out):
             udirs.setdefault(d.name, d)
 
     for d in udirs.values():
-        if args.chown:
+        if args.chown and not args.xattr:
             if not d.uids:
                 dp = d
                 while dp.parent:
@@ -832,8 +911,7 @@ def list_script(cfiles, out):
 def list_all(out):
     idir = Path(args.dir)
 
-    if args.list_directories or args.list_files or args.list_chunks or args.script:
-        dirs = lsdirs(idir / "dir-metadata-index.txt")
+    dirs = lsdirs(idir / "dir-metadata-index.txt")
 
     if args.list_directories:
         list_dirs(dirs, out)
@@ -856,7 +934,9 @@ def list_all(out):
 
 
 def process():
+    global maxpath
     parse_args()
+    maxpath = os.pathconf(str(Path(args.dest_dir)), "PC_PATH_MAX")
 
     if args.output is not None:
         out = open(args.output, "w")
