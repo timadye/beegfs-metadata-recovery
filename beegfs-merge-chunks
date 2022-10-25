@@ -18,13 +18,14 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("-v", "--verbose", action="store_true")
     parser.add_argument("-q", "--quiet", action="store_true")
+    parser.add_argument("-o", "--output", help="output file")
     parser.add_argument(
-        "-o",
-        "--output",
-        help="output file or directory (default writes to same location as inputs)",
+        "-d",
+        "--output-dir",
+        help="output directory for multiple output files (default writes to same location as inputs)",
     )
     parser.add_argument("-B", "--block-size", type=int, default=default_block_size)
-    parser.add_argument("-O", "--keep-order", action="store_true")
+    parser.add_argument("-O", "--guess-order", action="store_true")
     parser.add_argument("-f", "--force-overwrite", action="store_true")
     parser.add_argument("chunks", nargs="+")
     args = parser.parse_args()
@@ -65,11 +66,11 @@ def merge(infiles, outname):
             err(e)
             return 1
         files.append(File(name=fname, file=fin, stat=os.stat(fin.fileno())))
-    if not args.keep_order:
+    if args.guess_order:
         files.sort(key=lambda f: (-f.stat.st_size, f.stat.st_mtime_ns))
 
     outsize = sum([f.stat.st_size for f in files])
-    err("Create", outname, "from", len(files), "chunks,", outsize, "bytes")
+    info("create", outname, "from", len(files), "chunks,", outsize, "bytes")
     if args.verbose:
         for i, f in enumerate(files):
             info(f"{i}: {f.file.name} 0x{f.stat.st_size:08x} {modtime(f.stat)}")
@@ -111,20 +112,18 @@ def merge(infiles, outname):
 def process():
     parse_args()
 
+    if args.output is not None:
+        if args.output_dir is not None:
+            args.output = Path(args.output_dir) / args.output
+        return merge(args.chunks, args.output)
+
+    # process multiple output files
     chunks = defaultdict(list)
-    isdir = args.output is not None and Path(args.output).is_dir()
     for f in args.chunks:
         outname = re.sub(r"\.mercury\d\d\d$", "", f)
-        if isdir:
-            outname = str(Path(args.output) / Path(outname).name)
+        if args.output_dir is not None:
+            outname = str(Path(args.output_dir) / Path(outname).name)
         chunks[outname].append(f)
-
-    if args.output is not None and not isdir:
-        if len(chunks) != 1:
-            err("multiple output files with --output:", " ".join(chunks.keys()))
-            return 3
-        else:
-            chunks = {args.output: list(chunks.values())[0]}
 
     for outname, infiles in chunks.items():
         ret = merge(infiles, outname)
