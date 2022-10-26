@@ -63,14 +63,14 @@ def parse_args():
     parser.add_argument("-d", "--list-directories", action="store_true")
     parser.add_argument("-c", "--list-chunks", action="store_true")
     parser.add_argument("-s", "--script", action="store_true")
-    parser.add_argument("-e", "--empty-directories", action="store_true")
-    parser.add_argument("-m", "--missing-chunks", action="store_true")
+    parser.add_argument("-E", "--no-empty-directories", action="store_true")
+    parser.add_argument("-M", "--no-missing-chunks", action="store_true")
     parser.add_argument("-t", "--tags", action="store_true")
-    parser.add_argument("-M", "--metadata", action="store_true")
+    parser.add_argument("-m", "--metadata", action="store_true")
     parser.add_argument("-O", "--chown", action="store_true")
     parser.add_argument("-x", "--xattr", action="store_true")
     parser.add_argument("-T", "--timestamps", action="store_true")
-    parser.add_argument("-S", "--sizes", action="store_true")
+    parser.add_argument("-S", "--check-sizes", action="store_true")
     parser.add_argument("-H", "--hexdump", action="store_true")
     parser.add_argument("-j", "--no-merge", action="store_true")
     parser.add_argument(
@@ -357,7 +357,7 @@ def list_stor(f, info=False, abs=True):
         stfiles.sort(key=lambda fs: fs.stat)
         unsorted = False
         files = [s.name for s in stfiles]
-    if args.sizes and (info or unsorted or args.xattr):
+    if args.check_sizes and (info or unsorted or args.xattr):
         idir = Path(args.dir)
         stfiles = [filestat(idir, s) for s in files]
         if unsorted:
@@ -589,7 +589,7 @@ def lsfiles2(index, dirs):
                             )
                         )
 
-    if args.empty_directories:
+    if not args.no_empty_directories:
         for t, n in dlen.items():
             if n > 0:
                 dd = dtag.get(t)
@@ -708,7 +708,7 @@ def lschunks(index, files):
                 n += len(c.stors)
                 if len(c.stors) == 0:
                     if args.user is None:
-                        err(
+                        info(
                             "file",
                             dirfile(f.dir.name, f.name),
                             f"chunk {c.tag} not found",
@@ -720,7 +720,7 @@ def lschunks(index, files):
                         f"chunk {c.tag}:",
                         " ".join(c.stors),
                     )
-            if n == 0 and args.missing_chunks:
+            if n == 0 and not args.no_missing_chunks:
                 cfiles.append(f)
 
     cfiles += empty
