@@ -670,9 +670,6 @@ def lschunks(index, files):
                 f"chunk {t} used in multiple files:",
                 " ".join(f.dir.name + "/" + f.name for f in ff),
             )
-            # uff = nodup(f.dir.name + "/" + f.name for f in ff)
-            # if len(uff) > 1:
-            # err(f"chunk {t} used in multiple files:", " ".join(uff))
 
     cfiles = []
     with open(index, encoding="latin-1") as fin:
@@ -842,12 +839,10 @@ def list_script(cfiles, out):
                 file=out,
             )
         if args.xattr and st:
-            if not islink:
-                print(
-                    f"[ -h {fname} ] || \\\nchmod 0{stat.S_IMODE(st.st_mode):o}",
-                    fname,
-                    file=out,
-                )
+            if not islink and not args.symlink:
+                # chmod doesn't apply to symlinks, so don't use this if args.command made a symlink.
+                # That would change the target, which would be bad - if it were permitted.
+                print(f"chmod 0{stat.S_IMODE(st.st_mode):o}", fname, file=out)
             if args.chown:
                 print("chown -h", f"{st.st_uid}:{st.st_gid}", fname, file=out)
         if args.chown and not args.xattr:
