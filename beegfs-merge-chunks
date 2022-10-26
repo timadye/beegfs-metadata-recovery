@@ -7,7 +7,7 @@ from collections import defaultdict, namedtuple
 
 args = None
 ns = 1000000000
-default_block_size = 0x80000
+default_block_size = 0x80000  # 512k
 
 
 File = namedtuple("File", ["name", "file", "stat"])

@@ -55,6 +55,7 @@ gids = {}
 
 def parse_args():
     global args
+    mydir = Path(sys.argv[0]).parent
     parser = argparse.ArgumentParser()
     parser.add_argument("-v", "--verbose", action="store_true")
     parser.add_argument("-q", "--quiet", action="store_true")
@@ -72,15 +73,19 @@ def parse_args():
     parser.add_argument("-S", "--sizes", action="store_true")
     parser.add_argument("-H", "--hexdump", action="store_true")
     parser.add_argument("-j", "--no-merge", action="store_true")
+    parser.add_argument(
+        "-L",
+        "--symlink",
+        action="store_true",
+        help="symlink instead of copying if possible. Also specify this if --command makes symlinks to prevent chmod being used.",
+    )
     parser.add_argument("-X", "--xattr-dir")
     parser.add_argument("-n", "--max-files", type=int)
     parser.add_argument("-r", "--root_dir", default="")
     parser.add_argument("-u", "--user")
     parser.add_argument("-o", "--output")
-    parser.add_argument("-C", "--command", default="cp -n --preserve=timestamps")
-    parser.add_argument(
-        "--merge-command", default=Path(sys.argv[0]).parent / "beegfs-merge-chunks"
-    )
+    parser.add_argument("-C", "--command")
+    parser.add_argument("--merge-command", default=mydir / "beegfs-merge-chunks")
     parser.add_argument("-D", "--dest-dir", default="")
     parser.add_argument("dir", nargs="?", default="")
     args = parser.parse_args()
@@ -88,6 +93,8 @@ def parse_args():
         args.list_directories or args.list_files or args.list_chunks or args.script
     ):
         args.script = True
+    if args.command is None:
+        args.command = "ln -sn" if args.symlink else "cp -n --preserve=timestamps"
     if (args.hexdump or args.xattr_dir) and not args.xattr:
         args.xattr = True
     if args.xattr and args.xattr_dir is None:
@@ -813,7 +820,7 @@ def list_script(cfiles, out):
                 files.append((fname, 1, [c.meta], f.dir, c.xattr))
 
     for df, ifile, s, d, xattr in nodup(files, lambda l: l[:2]):
-        fname = quote(str(dest / (df)))
+        fname = quote(str(dest / df))
         islink = False
         if args.xattr:
             st = getstat(xattr, df)
@@ -823,7 +830,7 @@ def list_script(cfiles, out):
                     err("symlink {fname} target length is", st.st_size)
                     islink = False
         if islink:
-            print(f'ln -sn "$(< {quote(str(idir / s[0]))})"', quote(fname), file=out)
+            print(f'ln -sn "$(< {quote(str(idir / s[0]))})"', fname, file=out)
         elif len(s) == 1:
             print(args.command, quote(str(idir / s[0])), fname, file=out)
         else:
@@ -837,8 +844,8 @@ def list_script(cfiles, out):
         if args.xattr and st:
             if not islink:
                 print(
-                    f"[ -h {quote(fname)} ] || \\\nchmod 0{stat.S_IMODE(st.st_mode):o}",
-                    quote(fname),
+                    f"[ -h {fname} ] || \\\nchmod 0{stat.S_IMODE(st.st_mode):o}",
+                    fname,
                     file=out,
                 )
             if args.chown:
