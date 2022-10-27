@@ -13,8 +13,8 @@ class Uids(set):
 
 
 Dir = namedtuple(
-    "Dir", ["name", "tag", "metas", "nosub", "parent", "uids", "xattr"]
-)  # defaults=["", "", [], False, None, Uids, array("B")]  # py3.7
+    "Dir", ["name", "tag", "metas", "nosub", "parent", "uids", "inodes", "xattr"]
+)  # defaults=["", "", [], False, None, Uids, [], array("B")]  # py3.7
 File = namedtuple(
     "File", ["dir", "name", "tags", "chunks", "empty", "metas"]
 )  # defaults=[Dir(), "", [], [], False, []] # py3.7
@@ -223,32 +223,37 @@ def getxattr(meta):
 def xattr_offset(lxattr):
     # xattrlens = [140, 142, 144, 160, 162, 172, 176, 182, 192, 202]
     if lxattr >= 0xCA:  # 202
-        return 0x28, 0x3C
+        return 0x00, 0x28, 0x28, 0x3C
     elif lxattr >= 0xC0:  # 192
-        return 0x20, 0x34
+        return 0x00, 0x20, 0x20, 0x34
     elif lxattr >= 0xB6:  # 182
-        return 0x28, 0x28
+        return 0x00, 0x28, 0x28, 0x28
     elif lxattr >= 0xB0:  # 176
-        return 0x20, 0x24
+        return 0x00, 0x20, 0x20, 0x24
     elif lxattr >= 0xAC:  # 172
-        return 0x20, 0x20
+        return 0x00, 0x20, 0x20, 0x20
     elif lxattr >= 0xA0:  # 160
-        return 0x00, 0x14
+        return 0x00, 0x00, 0x00, 0x14
     elif lxattr >= 0x90:  # 144
-        return 0x00, 0x04
+        return 0x00, 0x00, 0x00, 0x04
     else:
-        return 0x00, 0x00
+        return 0x00, 0x00, 0x00, 0x00
+
+
+def xattr_offset_inode(lxattr):
+    # xattrlens = [114, 126, 134]
+    return -0x08, -0x08, -0x18, None
 
 
 def getservers(xattr, f, minservers=2):
-    i, j = xattr_offset(len(xattr))
-    if len(xattr) < j + 0x7E + 2 * minservers:
+    i, j, k, m = xattr_offset(len(xattr))
+    if len(xattr) < m + 0x7E + 2 * minservers:
         err(f"file {filename} xattr length {len(xattr)} is too short")
         return {}
-    # tag = str(xattr[j + 0x54 : j + 0x64]).rtrim("\0")
+    # tag = str(xattr[m + 0x54 : m + 0x64]).rtrim("\0")
     server_codes = [
         int.from_bytes(xattr[a : a + 2], "little")
-        for a in range(j + 0x7E, len(xattr) - 1, 2)
+        for a in range(m + 0x7E, len(xattr) - 1, 2)
     ]
     while server_codes and server_codes[-1] == 0:
         server_codes.pop()
@@ -261,27 +266,31 @@ def getservers(xattr, f, minservers=2):
     return servers
 
 
-def getstat(xattr, filename):
+def getstat_inode(xattr, filename, offset_fun=xattr_offset_inode):
+    return getstat(xattr, filename, offset_fun)
+
+
+def getstat(xattr, filename, offset_fun=xattr_offset):
     def getint(l, h, i=0):
         return int.from_bytes(xattr[i + l : i + h], "little")
 
     if not xattr:
         return None
-    i, j = xattr_offset(len(xattr))
-    if len(xattr) < i + 0x50:
+    i, j, k, m = offset_fun(len(xattr))
+    if len(xattr) < j + 0x50:
         err(f"file {filename} xattr length {len(xattr)} is too short")
         return None
     st = StatResult(
-        st_mode=getint(0x14, 0x18),
-        st_mtime=getint(0x18, 0x20, i),  # not sure if we swapped m/c/a/btime
-        st_ctime=getint(0x20, 0x28, i),
-        st_atime=getint(0x28, 0x30, i),
-        st_btime=getint(0x30, 0x38, i),
-        st_size=getint(0x38, 0x40, i),
-        st_nlink=getint(0x40, 0x48, i),  # just a guess, since this is always 1
-        st_uid=getint(0x48, 0x4C, i),
-        st_gid=getint(0x4C, 0x50, i),
-        # st_unknown=getint(0x50, 0x54, i),
+        st_mode=getint(0x14, 0x18, i),
+        st_mtime=getint(0x18, 0x20, j),  # not sure if we swapped m/c/a/btime
+        st_ctime=getint(0x20, 0x28, j),
+        st_atime=getint(0x28, 0x30, j),
+        st_btime=getint(0x30, 0x38, j),
+        st_size=getint(0x38, 0x40, k),  # not for dir
+        st_nlink=getint(0x40, 0x48, k),  # just a guess. not for dir
+        st_uid=getint(0x48, 0x4C, k),
+        st_gid=getint(0x4C, 0x50, k),
+        # st_unknown=getint(0x50, 0x54, j),
     )
     if st.st_mode != (stat.S_IFMT(st.st_mode) | stat.S_IMODE(st.st_mode)) or not (
         stat.S_ISREG(st.st_mode) or stat.S_ISLNK(st.st_mode) or stat.S_ISDIR(st.st_mode)
@@ -290,6 +299,16 @@ def getstat(xattr, filename):
     if getpwuid(st.st_uid) is None or getgrgid(st.st_gid) is None:
         err(f"file {filename} bad UID:GID {st.st_uid}:{st.st_gid}")
     return st
+
+
+def getguids_dir(d):
+    if d.xattr:
+        st = getstat_inode(d.xattr, d.name)
+        if st:
+            return [f"{st.st_uid}:{st.st_gid}"]
+    elif d.uids:
+        return d.uids
+    return []
 
 
 def getpwuid(uid):
@@ -338,8 +357,15 @@ def owner(st):
     return f"{uid}:{gid}"
 
 
+mindate = datetime.datetime(1990, 1, 1).timestamp()
+maxdate = datetime.datetime(2026, 1, 1).timestamp()
+
+
 def times(st):
     def time(t):
+        if t < mindate or t > maxdate:
+            err(f"time {t} out of range")
+            return ""
         return datetime.datetime.fromtimestamp(t).isoformat() if t else ""
 
     return (
@@ -411,6 +437,7 @@ def lsdirs(index):
                         parent=parent,
                         nosub=True,
                         uids=Uids(),
+                        inodes=[],
                         xattr=array("B"),
                     )
                 ]
@@ -424,6 +451,7 @@ def lsdirs(index):
             parent=parent,
             nosub=False,
             uids=Uids(),
+            inodes=[],
             xattr=array("B"),
         )
         dirs = [this] if (name + "/").startswith(select) else []
@@ -493,12 +521,14 @@ def lsdirs(index):
                     name=sdir,
                     tag=tag,
                     metas=[meta],
-                    parent=None,
-                    nosub=False,
-                    uids=Uids(),
-                    xattr=array("B"),
+                    parent=None,  # not used here
+                    nosub=False,  # not used here
+                    uids=None,  # not used here
+                    inodes=None,  # not used here
+                    xattr=None,  # not used here
                 )
             )
+        del lines
 
     dirs = lsdir(
         name="",
@@ -507,13 +537,47 @@ def lsdirs(index):
         top="root",
         select=args.root_dir + "/" if args.root_dir else "",
     )
+    del tags
+
     dirs = nodup(dirs, lambda d: (d.name, d.tag))  # unique tag/dir
 
-    # if args.xattr:
-    #     for d in dirs:
-    #         if d.metas:
-    #             d.xattr.frombytes(getxattr(d.metas[0]))
+    tags = defaultdict(list)
+    for d in dirs:
+        tags[d.tag].append(d)
+    add_dir_xattr(tags)
     return dirs
+
+
+def add_dir_xattr(tags):
+    index = args.xattr_dir / "inodes.txt"
+    if not args.xattr:
+        return
+    with open(index, encoding="latin-1") as fin:
+        n = 0
+        for l in fin:
+            n += 1
+            meta = l.rstrip("\n")
+            if not meta:
+                continue
+            if " " in meta:
+                err(f"{index}:{n}: bad format:", meta)
+                continue
+            tag = meta.split("/")[-1]
+            dd = tags.get(tag)
+            if dd is None:
+                if not args.root_dir:
+                    info(f"inode {meta} has no dir")
+                continue
+            for d in dd:
+                d.inodes.append(meta)
+                if d.xattr:
+                    info(f"dir {d.name} duplicate inode", meta)
+                    continue
+                d.xattr.frombytes(getxattr(meta))
+    for dd in tags.values():
+        for d in dd:
+            if not d.inodes:
+                info(f"dir {d.name} has no inode")
 
 
 def lsfiles2(index, dirs):
@@ -702,8 +766,8 @@ def lschunks(index, files):
     return cfiles
 
 
-def list_statinfo(xattr, fname):
-    st = getstat(xattr, fname)
+def list_statinfo(xattr, fname, getstat_fun=getstat):
+    st = getstat_fun(xattr, fname)
     if not st:
         return ""
     return (
@@ -751,7 +815,14 @@ def list_dirs(dirs, out):
             d.name
             + ("\t" + d.tag if args.tags else "")
             + ("\t" + " ".join(d.metas) if args.metadata else "")
-            + ("\t" + list_statinfo(d.xattr, d.name) if args.xattr else "")
+            + (
+                "\t"
+                + " ".join(d.inodes)
+                + "\t"
+                + list_statinfo(d.xattr, d.name, getstat_inode)
+                if args.xattr
+                else ""
+            )
             + ("".join(["\n" + l for l in hexdump(d.xattr)]) if args.hexdump else ""),
             file=out,
         )
@@ -849,16 +920,18 @@ def list_script(cfiles, out):
                 # That would change the target, which would be bad - if it were permitted.
                 print(f"chmod 0{stat.S_IMODE(st.st_mode):o}", fname, file=out)
             if args.chown:
-                d.uids.add(st.st_uid)
-                d.uids.direct = True
-                print("chown -h", f"{st.st_uid}:{st.st_gid}", fname, file=out)
+                guid = f"{st.st_uid}:{st.st_gid}"
+                if not d.xattr:
+                    d.uids.add(guid)
+                    d.uids.direct = True
+                print("chown -h", guid, fname, file=out)
         elif args.chown:
             um = re.match(r"[^/]+/storage/chunks/u([\da-fA-F]+)/", ss[0])
             if um:
-                uid = int(um.groups()[0], 16)
-                d.uids.add(uid)
+                guid = getugid(int(um.groups()[0], 16))
+                d.uids.add(guid)
                 d.uids.direct = True
-                print("chown -h", getugid(uid), fname, file=out)
+                print("chown -h", guid, fname, file=out)
     del files
 
     # find all needed dirs and their parents
@@ -867,52 +940,46 @@ def list_script(cfiles, out):
         d = f.dir
         udirs.setdefault(d.name, d)
         while d.parent:
-            if d.uids and not d.parent.uids.direct:
-                d.parent.uids.update(d.uids)
+            if not d.parent.xattr and not d.parent.uids.direct:
+                guids = getguids_dir(d)
+                if guids:
+                    d.parent.uids.update(guids)
             d = d.parent
             udirs.setdefault(d.name, d)
 
     for d in udirs.values():
-        if args.chown: # and not args.xattr:
-            if not d.uids:
-                dp = d
-                while dp.parent:
-                    dp = dp.parent
-                    if dp.uids:
-                        d.uids.update(dp.uids)
-                        break
-            if d.uids:
-                if len(d.uids) > 1:
-                    err(
-                        "dir",
-                        d.name,
-                        "multiple uids:",
-                        " ".join([getugid(u) for u in d.uids]),
-                    )
-                print(
-                    "chown -h",
-                    getugid(next(iter(d.uids))),
-                    quote(str(dest / d.name)),
-                    file=out,
-                )
-            else:
-                err("dir", d.name, "has no UID")
-
+        dname = quote(str(dest / d.name))
         if len(d.metas) == 1:
-            print(
-                "touch -r",
-                quote(str(idir / d.metas[0])),
-                quote(str(dest / d.name)),
-                file=out,
-            )
+            print("touch -r", quote(str(idir / d.metas[0])), dname, file=out)
         elif len(d.metas) > 1:
             print(
                 "touch -r $(ls -1dt",
                 " ".join([quote(str(idir / m)) for m in d.metas]),
                 "| head -1)",
-                quote(str(dest / d.name)),
+                dname,
                 file=out,
             )
+        st = getstat_inode(d.xattr, d.name) if args.xattr and d.xattr else None
+        if st:
+            print(f"chmod 0{stat.S_IMODE(st.st_mode):o}", dname, file=out)
+        if args.chown:  # and not args.xattr:
+            if st:
+                print(f"chown -h {st.st_uid}:{st.st_gid}", dname, file=out)
+            else:
+                if not d.uids:
+                    dp = d
+                    while dp.parent:
+                        dp = dp.parent
+                        guids = getguids_dir(dp)
+                        if guids:
+                            d.uids.update(guids)
+                            break
+                if d.uids:
+                    if len(d.uids) > 1:
+                        err("dir", d.name, "multiple uids:", " ".join(d.uids))
+                    print("chown -h", next(iter(d.uids)), dname, file=out)
+                else:
+                    err("dir", d.name, "has no UID")
 
 
 def list_all(out):
@@ -946,7 +1013,7 @@ def process():
     maxpath = os.pathconf(str(Path(args.dest_dir)), "PC_PATH_MAX")
 
     if args.output is not None:
-        out = open(args.output, "w")
+        out = open(args.output, "w", encoding="latin-1")
         if args.script:
             os.chmod(
                 out.fileno(),
