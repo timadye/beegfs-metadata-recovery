@@ -222,38 +222,45 @@ def getxattr(meta):
 
 def xattr_offset(lxattr):
     # xattrlens = [140, 142, 144, 160, 162, 172, 176, 182, 192, 202]
+    #          imode,itime,isize,iuid, iserv
     if lxattr >= 0xCA:  # 202
-        return 0x00, 0x28, 0x28, 0x3C
+        return 0x00, 0x28, 0x28, 0x28, 0x3C
     elif lxattr >= 0xC0:  # 192
-        return 0x00, 0x20, 0x20, 0x34
+        return 0x00, 0x20, 0x20, 0x20, 0x34
     elif lxattr >= 0xB6:  # 182
-        return 0x00, 0x28, 0x28, 0x28
+        return 0x00, 0x28, 0x28, 0x28, 0x28
     elif lxattr >= 0xB0:  # 176
-        return 0x00, 0x20, 0x20, 0x24
+        return 0x00, 0x20, 0x20, 0x20, 0x24
     elif lxattr >= 0xAC:  # 172
-        return 0x00, 0x20, 0x20, 0x20
+        return 0x00, 0x20, 0x20, 0x20, 0x20
     elif lxattr >= 0xA0:  # 160
-        return 0x00, 0x00, 0x00, 0x14
+        return 0x00, 0x00, 0x20, 0x20, 0x14
     elif lxattr >= 0x90:  # 144
-        return 0x00, 0x00, 0x00, 0x04
+        return 0x00, 0x00, 0x00, 0x00, 0x04
     else:
-        return 0x00, 0x00, 0x00, 0x00
+        return 0x00, 0x00, 0x00, 0x00, 0x00
 
 
 def xattr_offset_inode(lxattr):
     # xattrlens = [114, 126, 134]
-    return -0x08, -0x08, -0x18, None
+    #          imode, itime,isize,  iuid, iserv
+    if lxattr >= 0x86:  # 134
+        return -0x08, -0x08, None, -0x18, None
+    elif lxattr >= 0x7E:  # 126
+        return -0x08, -0x08, None, -0x18, None
+    elif lxattr >= 0x72:  # 114
+        return -0x08, -0x08, None, -0x18, None
 
 
 def getservers(xattr, f, minservers=2):
-    i, j, k, m = xattr_offset(len(xattr))
-    if len(xattr) < m + 0x7E + 2 * minservers:
+    iimode, itime, isize, iuid, iserv = xattr_offset(len(xattr))
+    if len(xattr) < iserv + 0x7E + 2 * minservers:
         err(f"file {filename} xattr length {len(xattr)} is too short")
         return {}
-    # tag = str(xattr[m + 0x54 : m + 0x64]).rtrim("\0")
+    # tag = str(xattr[iserv + 0x54 : iserv + 0x64]).rtrim("\0")
     server_codes = [
         int.from_bytes(xattr[a : a + 2], "little")
-        for a in range(m + 0x7E, len(xattr) - 1, 2)
+        for a in range(iserv + 0x7E, len(xattr) - 1, 2)
     ]
     while server_codes and server_codes[-1] == 0:
         server_codes.pop()
@@ -272,25 +279,27 @@ def getstat_inode(xattr, filename, offset_fun=xattr_offset_inode):
 
 def getstat(xattr, filename, offset_fun=xattr_offset):
     def getint(l, h, i=0):
+        if i is None:
+            return 0
         return int.from_bytes(xattr[i + l : i + h], "little")
 
     if not xattr:
         return None
-    i, j, k, m = offset_fun(len(xattr))
-    if len(xattr) < j + 0x50:
+    imode, itime, isize, iuid, iserv = offset_fun(len(xattr))
+    if len(xattr) < itime + 0x50:
         err(f"file {filename} xattr length {len(xattr)} is too short")
         return None
     st = StatResult(
-        st_mode=getint(0x14, 0x18, i),
-        st_mtime=getint(0x18, 0x20, j),  # not sure if we swapped m/c/a/btime
-        st_ctime=getint(0x20, 0x28, j),
-        st_atime=getint(0x28, 0x30, j),
-        st_btime=getint(0x30, 0x38, j),
-        st_size=getint(0x38, 0x40, k),  # not for dir
-        st_nlink=getint(0x40, 0x48, k),  # just a guess. not for dir
-        st_uid=getint(0x48, 0x4C, k),
-        st_gid=getint(0x4C, 0x50, k),
-        # st_unknown=getint(0x50, 0x54, j),
+        st_mode=getint(0x14, 0x18, imode),
+        st_mtime=getint(0x18, 0x20, itime),  # not sure if we swapped m/c/a/btime
+        st_ctime=getint(0x20, 0x28, itime),
+        st_atime=getint(0x28, 0x30, itime),
+        st_btime=getint(0x30, 0x38, itime),
+        st_size=getint(0x38, 0x40, isize),
+        st_nlink=getint(0x40, 0x48, isize),  # just a guess
+        st_uid=getint(0x48, 0x4C, iuid),
+        st_gid=getint(0x4C, 0x50, iuid),
+        # st_unknown=getint(0x50, 0x54, iuid),
     )
     if st.st_mode != (stat.S_IFMT(st.st_mode) | stat.S_IMODE(st.st_mode)) or not (
         stat.S_ISREG(st.st_mode) or stat.S_ISLNK(st.st_mode) or stat.S_ISDIR(st.st_mode)
@@ -475,11 +484,11 @@ def lsdirs(index):
             dsubs[s.name].append(s.metas)
         for (d, t), mm in tsubs.items():
             if len(mm) > 1:
-                info(f"directory {named}{d} has multiple metadata:", " ".join(mm))
+                info(f"dir {named}{d} has multiple metadata:", " ".join(mm))
             dsubs.pop(d, None)
         for d, mm in dsubs.items():
             if len(mm) > 1:
-                info(f"directory {named}{d} has multiple tags:", " ".join(mm))
+                info(f"dire {named}{d} has multiple tags:", " ".join(mm))
         return dirs
 
     tags = defaultdict(list)
@@ -570,14 +579,14 @@ def add_dir_xattr(tags):
                 continue
             for d in dd:
                 d.inodes.append(meta)
-                if d.xattr:
-                    info(f"dir {d.name} duplicate inode", meta)
-                    continue
-                d.xattr.frombytes(getxattr(meta))
     for dd in tags.values():
         for d in dd:
             if not d.inodes:
-                info(f"dir {d.name} has no inode")
+                err(f"dir {d.name} has no inode")
+                continue
+            if len(d.inodes) > 1:
+                info(f"dir {d.name} has multiple inodes", " ".join(d.inodes))
+            d.xattr.frombytes(getxattr(d.inodes[0]))
 
 
 def lsfiles2(index, dirs):
