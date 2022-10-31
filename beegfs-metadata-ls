@@ -84,23 +84,28 @@ def parse_args():
         action="store_true",
         help="symlink instead of copying if possible. Also specify this if --command makes symlinks to prevent chmod being used.",
     )
+    parser.add_argument("-w", "--walk", action="store_true")
     parser.add_argument("-X", "--xattr-dir")
     parser.add_argument("-n", "--max-files", type=int)
     parser.add_argument("-r", "--root_dir", default="")
     parser.add_argument("-u", "--user")
-    parser.add_argument("-o", "--output")
+    parser.add_argument("-o", "--output", nargs="+")
     parser.add_argument("-C", "--command")
     parser.add_argument("--merge-command", default=mydir / "beegfs-merge-chunks")
     parser.add_argument("-D", "--dest-dir", default="")
     parser.add_argument("dir", nargs="?", default="")
     args = parser.parse_args()
     if not (
-        args.list_directories or args.list_files or args.list_chunks or args.script
+        args.walk
+        or args.list_directories
+        or args.list_files
+        or args.list_chunks
+        or args.script
     ):
         args.script = True
     if args.command is None:
         args.command = "ln -sn" if args.symlink else "cp -n --preserve=timestamps"
-    if (args.hexdump or args.xattr_dir) and not args.xattr:
+    if (args.walk or args.hexdump or args.xattr_dir) and not args.xattr:
         args.xattr = True
     if args.xattr and args.xattr_dir is None:
         args.xattr_dir = args.dir
@@ -213,8 +218,12 @@ def hexchunks(seq, size):
 
 
 def getxattr(meta):
+    return getxattr_abs(args.xattr_dir / meta)
+
+
+def getxattr_abs(fname, aname="user.fhgfs"):
     try:
-        return os.getxattr(args.xattr_dir / meta, "user.fhgfs")
+        return os.getxattr(fname, aname)
     except IOError as e:
         err(e)
         return b""
@@ -234,7 +243,7 @@ def xattr_offset(lxattr):
     elif lxattr >= 0xAC:  # 172
         return 0x00, 0x20, 0x20, 0x20, 0x20
     elif lxattr >= 0xA0:  # 160
-        return 0x00, 0x00, 0x20, 0x20, 0x14
+        return 0x00, 0x00, 0x00, 0x00, 0x14
     elif lxattr >= 0x90:  # 144
         return 0x00, 0x00, 0x00, 0x00, 0x04
     else:
@@ -421,7 +430,7 @@ def get_stors(f, info=False, abs=False):
                 err(f"file {fname} size from xattr is {szstor}, but is {sz} on disk")
         if info:
             return [
-                (fs if args.metadata else str(idir / fs.name))
+                (fs.name if args.metadata else str(idir / fs.name))
                 + f" ({fs.stat.st_size},0x{fs.stat.st_size:X})"
                 for fs in stfiles
             ] + ([f"(={sz},0x{sz:X})"] if len(stfiles) > 1 else [])
@@ -429,6 +438,53 @@ def get_stors(f, info=False, abs=False):
         return [str(Path(args.dir) / s) for s in files]
     else:
         return files
+
+
+def walk_glob(idir, out, typ="dentries"):
+    # another implementation of walk(). This one seems to be a bit slower.
+    n = 0
+    seen = set()
+    for dentries in [f"*/meta/{typ}/**/*", f"*/meta/buddymir/{typ}/**/*"]:
+        for f in idir.glob(dentries):
+            name = f[f.index(f"/{typ}/") + len(typ) + 2 :]
+            if name in seen:
+                continue
+            if not f.is_file():
+                continue
+            n += 1
+            if args.max_files is not None and n > args.max_files:
+                return
+            meta = str(f.relative_to(idir))
+            xattr = getxattr_abs(f)
+            if not xattr:
+                err(f"file {meta} has no xattr")
+                continue
+            seen.add(name)
+            print(meta + "\t" + xattr.hex(), file=out)
+
+
+def walk(idir, out, typ="dentries"):
+    n = 0
+    seen = set()
+    for dentries in ["*/meta/" + typ, "*/meta/buddymir/" + typ]:
+        for d in idir.glob(dentries):
+            for root, dirs, files in os.walk(d):
+                proot = Path(root)
+                for fname in files:
+                    f = proot / fname
+                    name = str(f.relative_to(d))
+                    if name in seen:
+                        continue
+                    n += 1
+                    if args.max_files is not None and n > args.max_files:
+                        return
+                    meta = str(f.relative_to(idir))
+                    xattr = getxattr_abs(f)
+                    if not xattr:
+                        err(f"file {meta} has no xattr")
+                        continue
+                    seen.add(name)
+                    print(meta + "\t" + xattr.hex(), file=out)
 
 
 def lsdirs(index):
@@ -992,28 +1048,46 @@ def list_script(cfiles, out):
 
 
 def list_all(out):
-    idir = Path(args.dir)
+    def thisout():
+        nonlocal iout
+        f = out[iout] if iout < len(out) else out[-1]
+        iout += 1
+        return f
 
-    dirs = lsdirs(idir / "dir-metadata-index.txt")
+    idir = Path(args.dir)
+    iout = 0
+
+    if args.walk:
+        walk(args.xattr_dir, thisout())
+        walk(args.xattr_dir, thisout(), typ="inodes")
+
+    if args.list_directories or args.list_files or args.list_chunks or args.script:
+        dirs = lsdirs(idir / "dir-metadata-index.txt")
 
     if args.list_directories:
-        list_dirs(dirs, out)
+        list_dirs(dirs, thisout())
 
     if args.list_files or args.list_chunks or args.script:
         files = lsfiles(idir / "file-metadata-index.txt", dirs)
         del dirs
 
     if args.list_files:
-        list_files(files, out)
+        list_files(files, thisout())
 
     if args.list_chunks or args.script:
         cfiles = lschunks(idir / "storage-chunk-index.txt", files)
         del files
 
     if args.list_chunks:
-        list_chunks(cfiles, out)
+        list_chunks(cfiles, thisout())
+
     if args.script:
-        list_script(cfiles, out)
+        f = thisout()
+        os.chmod(
+            f.fileno(),
+            os.stat(f.fileno()).st_mode | (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH),
+        )
+        list_script(cfiles, f)
 
 
 def process():
@@ -1021,21 +1095,18 @@ def process():
     parse_args()
     maxpath = os.pathconf(str(Path(args.dest_dir)), "PC_PATH_MAX")
 
+    out = []
     if args.output is not None:
-        out = open(args.output, "w", encoding="latin-1")
-        if args.script:
-            os.chmod(
-                out.fileno(),
-                os.stat(out.fileno()).st_mode
-                | (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH),
-            )
+        for o in args.output:
+            out.append(open(o, "w", encoding="latin-1"))
     else:
-        out = sys.stdout
+        out.append(sys.stdout)
 
     list_all(out)
 
     if args.output is not None:
-        out.close()
+        for f in out:
+            f.close()
 
     return 0
 
