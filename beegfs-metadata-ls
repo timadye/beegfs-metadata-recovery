@@ -4,13 +4,14 @@ import sys, os, stat, pwd, grp, datetime, argparse, re, itertools, collections, 
 from collections import defaultdict, namedtuple
 from pathlib import Path
 from array import array
-
+from enum import Enum
 
 class Uids(set):
     def __init__(self, s=set(), direct=False):
         self.update(s)
         self.direct = direct
 
+MetaType = Enum("MetaType", "DirEntry Dir File Inode")
 
 Dir = namedtuple(
     "Dir", ["name", "tag", "metas", "nosub", "parent", "uids", "inodes", "xattr"]
@@ -22,7 +23,7 @@ Chunk = namedtuple(
     "Chunk", ["tag", "meta", "stors", "xattr"]
 )  # defaults=["", "", [], array("B")"]  # py3.7
 FileStat = namedtuple("FileStat", ["name", "stat"])
-Meta = namedtuple("Meta", ["name", "tag", "dir", "file", "meta", "xattr"])
+Meta = namedtuple("Meta", ["name", "tag", "dir", "file", "meta", "xattr", "metatype"])
 StatResult = namedtuple(
     "StatResult",
     [
@@ -491,7 +492,7 @@ def walk(idir, out, typ="dentries"):
 
 
 def lsmeta(index):
-    dentries = []
+    dentries = defaultdict(list)
     dirs = defaultdict(list)
     subdirs = defaultdict(list)
     files = defaultdict(list)
@@ -535,9 +536,10 @@ def lsmeta(index):
                             dir=d,
                             file=None,
                             meta=meta,
-                            xattr=xattr  # file.xattr is only needed to check below
+                            xattr=xattr,  # file.xattr is only needed to check below
                             # it is identical to dentries xattr.
                             # So if we didn't check, we could save memory and not save xattr.
+                            metatype=MetaType.File,
                         )
                     )
                 else:
@@ -545,13 +547,13 @@ def lsmeta(index):
                     if isdir:
                         f = inodes.setdefault(xtag, [])
                         m = Meta(
-                            name=ftag, tag=xtag, dir=d, file=f, meta=meta, xattr=xattr
+                            name=ftag, tag=xtag, dir=d, file=f, meta=meta, xattr=xattr, metatype=MetaType.Dir
                         )
                         dirs[xtag].append(m)
                         subdirs[dtag].append(m)
                     else:
                         f = files.setdefault(xtag, [])
-                        dentries.append(
+                        dentries[xtag].append(
                             Meta(
                                 name=ftag,
                                 tag=xtag,
@@ -559,6 +561,7 @@ def lsmeta(index):
                                 file=f,
                                 meta=meta,
                                 xattr=xattr,
+                                metatype=MetaType.DirEntry,
                             )
                         )
             elif "inodes" in p[2:4]:
@@ -568,16 +571,16 @@ def lsmeta(index):
                     err(f"inode {meta} tag {ftag} does not match its xattr tag {xtag}")
                 inodes[ftag].append(
                     Meta(
-                        name=None, tag=ftag, dir=None, file=None, meta=meta, xattr=xattr
+                        name=None, tag=ftag, dir=None, file=None, meta=meta, xattr=xattr, metatype=MetaType.Inode,
                     )
                 )
             else:
                 err(f"{index}:{n}: file is not inodes or dentries:", line)
                 continue
 
-    defdir = Meta(name="", tag="", dir=[], file=[], meta="", xattr=b"")
-    deffile = Meta(name=None, tag="", dir=[], file=None, meta="", xattr=b"")
-    definode = Meta(name=None, tag="", dir=None, file=None, meta="", xattr=b"")
+    defdir = Meta(name="", tag="", dir=[], file=[], meta="", xattr=b"", metatype=MetaType.Dir)
+    deffile = Meta(name=None, tag="", dir=[], file=None, meta="", xattr=b"", metatype=MetaType.File)
+    definode = Meta(name=None, tag="", dir=None, file=None, meta="", xattr=b"", metatype=MetaType.Inode)
     defdir.file.append(definode)
     defdir.dir.append(defdir)
     deffile.dir.append(defdir)
@@ -595,26 +598,33 @@ def lsmeta(index):
                 err(f"duplicate", xname, xt + ":", *[xv.meta for xv in xm])
                 del xm[1:]
 
-    for f in dentries:
-        if f.dir.tag != f.file.dir.tag:
-            err("dentry dir is {f.dir.meta}, but file dir is {f.file.dir.meta}")
-        if f.xattr != f.file[0].xattr and f.xattr and f.file[0].xattr:
-            # not error if xattr is missing, because we've already reported that
-            err(
-                "direntry",
-                f.meta,
-                "and file",
-                f.file[0].meta,
-                "xattr don't match: len",
-                len(f.xattr),
-                "->",
-                str(len(f.file[0].meta))
-                + (hexdump(f.xattr) + "\n---" + hexdump(f.file[0].xattr))
-                if args.hexdump
-                else "",
-            )
+    dlist = []
+    for t, ff in dentries.items():
+        for f in ff:
+            if f.dir.tag != f.file.dir.tag:
+                err("dentry dir is {f.dir.meta}, but file dir is {f.file.dir.meta}")
+            if f.xattr != f.file[0].xattr and f.xattr and f.file[0].xattr:
+                # not error if xattr is missing, because we've already reported that
+                err(
+                    "direntry",
+                    f.meta,
+                    "and file",
+                    f.file[0].meta,
+                    "xattr don't match: len",
+                    len(f.xattr),
+                    "->",
+                    str(len(f.file[0].meta))
+                    + (hexdump(f.xattr) + "\n---" + hexdump(f.file[0].xattr))
+                    if args.hexdump
+                    else "",
+                )
+        if len(ff) > 1:
+            info("file {t} has multiple dentries (hard link):", " ".join(f.meta for f in ff))
+            for f in ff[1:]:
+                f.file[:] = [ff[0]]
+        dlist.extend(ff)
 
-    return subdirs, dentries
+    return subdirs, dlist
 
 
 def lsdirs(tags):
@@ -718,7 +728,7 @@ def lsfiles2(mfiles, dirs):
                     name=m.name,
                     tags=[m.tag],
                     chunks=[
-                        Chunk(tag=f.tag, meta=f.meta, stors=[], xattr=f.xattr)
+                        Chunk(tag=f.tag, meta=f.meta, stors=[], xattr=f.xattr, islink=(f.metatype==MetaType.DirEntry)
                         for f in m.file
                     ],
                     empty=False,
@@ -795,12 +805,12 @@ def lschunks(index, files):
             # if len(f.chunks)>1, each element gets the same f so we can update the appropriate bit for each chunk
             ctags[c.tag].append(f)
 
-    for t, ff in ctags.items():
-        if len(ff) > 1:
-            err(
-                f"chunk {t} used in multiple files:",
-                " ".join(f.dir.name + "/" + f.name for f in ff),
-            )
+    # for t, ff in ctags.items():
+    #     if len(ff) > 1:
+    #         err(
+    #             f"chunk {t} used in multiple files:",
+    #             " ".join(f.dir.name + "/" + f.name for f in ff),
+    #         )
 
     cfiles = []
     with open(index, encoding="latin-1") as fin:
