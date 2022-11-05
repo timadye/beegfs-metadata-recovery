@@ -22,6 +22,7 @@ Chunk = namedtuple(
     "Chunk", ["tag", "meta", "stors", "xattr"]
 )  # defaults=["", "", [], array("B")"]  # py3.7
 FileStat = namedtuple("FileStat", ["name", "stat"])
+Meta = namedtuple("Meta", ["name", "tag", "dir", "file", "meta", "xattr"])
 StatResult = namedtuple(
     "StatResult",
     [
@@ -59,6 +60,7 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("-v", "--verbose", action="store_true")
     parser.add_argument("-q", "--quiet", action="store_true")
+    parser.add_argument("-0", "--list-meta", action="store_true")
     parser.add_argument("-f", "--list-files", action="store_true")
     parser.add_argument("-d", "--list-directories", action="store_true")
     parser.add_argument("-c", "--list-chunks", action="store_true")
@@ -68,7 +70,7 @@ def parse_args():
     parser.add_argument("-t", "--tags", action="store_true")
     parser.add_argument("-m", "--metadata", action="store_true")
     parser.add_argument("-O", "--chown", action="store_true")
-    parser.add_argument("-x", "--xattr", action="store_true")
+    parser.add_argument("-X", "--no-xattr", action="store_true")
     parser.add_argument("-T", "--timestamps", action="store_true")
     parser.add_argument(
         "-S",
@@ -85,7 +87,7 @@ def parse_args():
         help="symlink instead of copying if possible. Also specify this if --command makes symlinks to prevent chmod being used.",
     )
     parser.add_argument("-w", "--walk", action="store_true")
-    parser.add_argument("-X", "--xattr-dir")
+    parser.add_argument("-x", "--xattr-dir")
     parser.add_argument("-n", "--max-files", type=int)
     parser.add_argument("-r", "--root_dir", default="")
     parser.add_argument("-u", "--user")
@@ -105,11 +107,11 @@ def parse_args():
         args.script = True
     if args.command is None:
         args.command = "ln -sn" if args.symlink else "cp -n --preserve=timestamps"
-    if (args.walk or args.hexdump or args.xattr_dir) and not args.xattr:
-        args.xattr = True
-    if args.xattr and args.xattr_dir is None:
+    if (args.walk or args.hexdump or args.xattr_dir) and args.no_xattr:
+        args.no_xattr = False
+    if not args.no_xattr and args.xattr_dir is None:
         args.xattr_dir = args.dir
-    if args.xattr:
+    if not args.no_xattr:
         args.xattr_dir = Path(args.xattr_dir)
 
 
@@ -173,7 +175,14 @@ def filestat(idir, s):
     return FileStat(s, st)
 
 
-def hexdump(data, size=2, sep=" "):
+def hexdump(data, firstnl=True):
+    if args.hexdump:
+        return ("\n" if firstnl and len(data) else "") + "\n".join(hexdump_gen(data))
+    else:
+        return ""
+
+
+def hexdump_gen(data, size=2, sep=" "):
     """Generator that produces lines of a hex dump to print
     binary data line by line to the hex dump text format:
     00000000: 00 00 00 00 00 00 00 00  00 00 00 00 00 00 00 00  ................
@@ -217,11 +226,7 @@ def hexchunks(seq, size):
         yield seq[d * size :]
 
 
-def getxattr(meta):
-    return getxattr_abs(args.xattr_dir / meta)
-
-
-def getxattr_abs(fname, aname="user.fhgfs"):
+def getxattr(fname, aname="user.fhgfs"):
     try:
         return os.getxattr(fname, aname)
     except IOError as e:
@@ -230,40 +235,56 @@ def getxattr_abs(fname, aname="user.fhgfs"):
 
 
 def xattr_offset(lxattr):
-    # xattrlens = [140, 142, 144, 160, 162, 172, 176, 182, 192, 202]
-    #          imode,itime,isize,iuid, iserv
+    # xattrlens = [32, 140, 142, 144, 160, 162, 172, 176, 182, 192, 202]
+    #          itag, imode,itime,isize,iuid, iserv
     if lxattr >= 0xCA:  # 202
-        return 0x00, 0x28, 0x28, 0x28, 0x3C
+        return 0x90, 0x00, 0x28, 0x28, 0x28, 0x3C
     elif lxattr >= 0xC0:  # 192
-        return 0x00, 0x20, 0x20, 0x20, 0x34
+        return 0x88, 0x00, 0x20, 0x20, 0x20, 0x34
     elif lxattr >= 0xB6:  # 182
-        return 0x00, 0x28, 0x28, 0x28, 0x28
+        return 0x7C, 0x00, 0x28, 0x28, 0x28, 0x28
     elif lxattr >= 0xB0:  # 176
-        return 0x00, 0x20, 0x20, 0x20, 0x24
+        return 0x78, 0x00, 0x20, 0x20, 0x20, 0x24
     elif lxattr >= 0xAC:  # 172
-        return 0x00, 0x20, 0x20, 0x20, 0x20
+        return 0x74, 0x00, 0x20, 0x20, 0x20, 0x20
     elif lxattr >= 0xA0:  # 160
-        return 0x00, 0x00, 0x00, 0x00, 0x14
+        return 0x68, 0x00, 0x00, 0x00, 0x00, 0x14
     elif lxattr >= 0x90:  # 144
-        return 0x00, 0x00, 0x00, 0x00, 0x04
+        return 0x58, 0x00, 0x00, 0x00, 0x00, 0x04
+    elif lxattr >= 0x8C:  # 140
+        return 0x54, 0x00, 0x00, 0x00, 0x00, 0x00
+    elif lxattr >= 0x20:  # 32
+        return 0x0C, None, None, None, None, None
     else:
-        return 0x00, 0x00, 0x00, 0x00, 0x00
+        return None, None, None, None, None, None
 
 
 def xattr_offset_inode(lxattr):
     # xattrlens = [114, 126, 134]
-    #          imode, itime,isize,  iuid, iserv
+    #          itag, imode, itime,isize,  iuid, iserv
     if lxattr >= 0x86:  # 134
-        return -0x08, -0x08, None, -0x18, None
+        return 0x40, -0x08, -0x08, None, -0x18, None
     elif lxattr >= 0x7E:  # 126
-        return -0x08, -0x08, None, -0x18, None
+        return 0x40, -0x08, -0x08, None, -0x18, None
     elif lxattr >= 0x72:  # 114
-        return -0x08, -0x08, None, -0x18, None
+        return 0x40, -0x08, -0x08, None, -0x18, None
+    else:
+        return None, None, None, None, None, None
 
 
-def getservers(xattr, f, minservers=2):
-    iimode, itime, isize, iuid, iserv = xattr_offset(len(xattr))
-    if len(xattr) < iserv + 0x7E + 2 * minservers:
+def gettag(xattr, filename, offset_fun=xattr_offset):
+    itag, *_ = offset_fun(len(xattr))
+    if itag is None:
+        return ""
+    tag = b2str(xattr[itag + 0x00 : itag + 0x10]).rstrip("\0")
+    if not re.match(r"[\dA-F]+-[\dA-F]+-[\dA-F]+$", tag):
+        err(f"file {filename} bad tag:", repr(tag))
+    return tag
+
+
+def getservers(xattr, filename, minservers=2):
+    _, _, _, _, _, iserv = xattr_offset(len(xattr))
+    if iserv is None or len(xattr) < iserv + 0x7E + 2 * minservers:
         err(f"file {filename} xattr length {len(xattr)} is too short")
         return {}
     # tag = str(xattr[iserv + 0x54 : iserv + 0x64]).rtrim("\0")
@@ -276,7 +297,7 @@ def getservers(xattr, f, minservers=2):
     servers = {server_decode.get(s, ""): i for i, s in enumerate(server_codes)}
     if any([not s for s in servers.keys()]):
         err(
-            f"file {dirfile(f.dir.name, f.name)} bad server codes:",
+            f"file {filename} bad server codes:",
             " ".join(f"{x:02X}" for x in server_codes if x is not None),
         )
     return servers
@@ -294,7 +315,7 @@ def getstat(xattr, filename, offset_fun=xattr_offset):
 
     if not xattr:
         return None
-    imode, itime, isize, iuid, iserv = offset_fun(len(xattr))
+    _, imode, itime, isize, iuid, _ = offset_fun(len(xattr))
     if len(xattr) < itime + 0x50:
         err(f"file {filename} xattr length {len(xattr)} is too short")
         return None
@@ -401,8 +422,8 @@ def get_stors(f, info=False, abs=False):
     fname = dirfile(f.dir.name, f.name)
     files = [s for s in nodup(s for c in f.chunks for s in c.stors)]
     unsorted = len(files) > 1
-    if args.xattr and unsorted and f.chunks[0].xattr:
-        servers = getservers(f.chunks[0].xattr, f)
+    if (not args.no_xattr) and unsorted and f.chunks[0].xattr:
+        servers = getservers(f.chunks[0].xattr, fname)
         stfiles = [FileStat(s, servers.get(s.split("/")[0], -1)) for s in files]
         bad = [fs.name for fs in stfiles if fs.stat == -1]
         if bad:
@@ -413,14 +434,14 @@ def get_stors(f, info=False, abs=False):
         stfiles.sort(key=lambda fs: fs.stat)
         unsorted = False
         files = [s.name for s in stfiles]
-    if args.sizes and (info or unsorted or args.xattr):
+    if args.sizes and (info or unsorted or not args.no_xattr):
         idir = Path(args.dir)
         stfiles = [filestat(idir, s) for s in files]
         if unsorted:
             stfiles.sort(key=lambda f: (-f.stat.st_size, f.stat.st_mtime_ns))
             files = [s.name for s in stfiles]
         sz = sum(fs.stat.st_size for fs in stfiles)
-        if args.xattr:
+        if not args.no_xattr:
             if f.chunks:
                 st = getstat(f.chunks[0].xattr, fname)
                 szstor = st.st_size if st else None
@@ -440,27 +461,8 @@ def get_stors(f, info=False, abs=False):
         return files
 
 
-def walk_glob(idir, out, typ="dentries"):
-    # another implementation of walk(). This one seems to be a bit slower.
-    n = 0
-    seen = set()
-    for dentries in [f"*/meta/{typ}/**/*", f"*/meta/buddymir/{typ}/**/*"]:
-        for f in idir.glob(dentries):
-            name = f[f.index(f"/{typ}/") + len(typ) + 2 :]
-            if name in seen:
-                continue
-            if not f.is_file():
-                continue
-            n += 1
-            if args.max_files is not None and n > args.max_files:
-                return
-            meta = str(f.relative_to(idir))
-            xattr = getxattr_abs(f)
-            if not xattr:
-                err(f"file {meta} has no xattr")
-                continue
-            seen.add(name)
-            print(meta + "\t" + xattr.hex(), file=out)
+def b2str(b):
+    return b.decode("latin-1")
 
 
 def walk(idir, out, typ="dentries"):
@@ -468,9 +470,10 @@ def walk(idir, out, typ="dentries"):
     seen = set()
     for dentries in ["*/meta/" + typ, "*/meta/buddymir/" + typ]:
         for d in idir.glob(dentries):
-            for root, dirs, files in os.walk(d):
-                proot = Path(root)
-                for fname in files:
+            for root, dirs, files in os.walk(bytes(str(d), "utf-8")):
+                proot = Path(b2str(root))
+                for bfname in files:
+                    fname = b2str(bfname)
                     f = proot / fname
                     name = str(f.relative_to(d))
                     if name in seen:
@@ -479,7 +482,7 @@ def walk(idir, out, typ="dentries"):
                     if args.max_files is not None and n > args.max_files:
                         return
                     meta = str(f.relative_to(idir))
-                    xattr = getxattr_abs(f)
+                    xattr = getxattr(root + b"/" + bfname)
                     if not xattr:
                         err(f"file {meta} has no xattr")
                         continue
@@ -487,8 +490,135 @@ def walk(idir, out, typ="dentries"):
                     print(meta + "\t" + xattr.hex(), file=out)
 
 
-def lsdirs(index):
-    def lsdir(name, tag, metas, parent=None, select="", top=None, depth=0):
+def lsmeta(index):
+    dentries = []
+    dirs = defaultdict(list)
+    subdirs = defaultdict(list)
+    files = defaultdict(list)
+    inodes = defaultdict(list)
+    with open(index, encoding="latin-1") as fin:
+        n = 0
+        for l in fin:
+            n += 1
+            if args.max_files is not None and n > args.max_files:
+                break
+            line = l.rstrip("\n")
+            flds = line.split("\t")
+            meta = flds[0]
+            p = meta.split("/")
+            if not (len(flds) == 2 and len(p) >= 5 and p[1] == "meta"):
+                err(f"{index}:{n}: bad format:", line)
+                continue
+            if not flds[1]:
+                err(f"{index}:{n}: missing xattr in line:", line)
+                continue
+            try:
+                xattr = bytes.fromhex(flds[1])
+            except ValueError:
+                err(f"{index}:{n}: bad xattr in line:", line)
+                continue
+            isdir = len(xattr) == 32
+            if args.no_xattr:
+                xattr = b""
+            if "dentries" in p[2:4]:
+                xtag = gettag(xattr, meta)
+                dtag, ftag = p[-2:]
+                if dtag == "#fSiDs#":
+                    if xtag != ftag:
+                        err(f"file {meta} tag {ftag} does not match xattr tag {xtag}")
+                    dtag = p[-3]
+                    d = dirs.setdefault(dtag, [])
+                    files[ftag].append(
+                        Meta(
+                            name=None,
+                            tag=ftag,
+                            dir=d,
+                            file=None,
+                            meta=meta,
+                            xattr=xattr  # file.xattr is only needed to check below
+                            # it is identical to dentries xattr.
+                            # So if we didn't check, we could save memory and not save xattr.
+                        )
+                    )
+                else:
+                    d = dirs.setdefault(dtag, [])
+                    if isdir:
+                        f = inodes.setdefault(xtag, [])
+                        m = Meta(
+                            name=ftag, tag=xtag, dir=d, file=f, meta=meta, xattr=xattr
+                        )
+                        dirs[xtag].append(m)
+                        subdirs[dtag].append(m)
+                    else:
+                        f = files.setdefault(xtag, [])
+                        dentries.append(
+                            Meta(
+                                name=ftag,
+                                tag=xtag,
+                                dir=d,
+                                file=f,
+                                meta=meta,
+                                xattr=xattr,
+                            )
+                        )
+            elif "inodes" in p[2:4]:
+                xtag = gettag(xattr, meta, offset_fun=xattr_offset_inode)
+                ftag = p[-1]
+                if xtag != ftag:
+                    err(f"inode {meta} tag {ftag} does not match its xattr tag {xtag}")
+                inodes[ftag].append(
+                    Meta(
+                        name=None, tag=ftag, dir=None, file=None, meta=meta, xattr=xattr
+                    )
+                )
+            else:
+                err(f"{index}:{n}: file is not inodes or dentries:", line)
+                continue
+
+    defdir = Meta(name="", tag="", dir=[], file=[], meta="", xattr=b"")
+    deffile = Meta(name=None, tag="", dir=[], file=None, meta="", xattr=b"")
+    definode = Meta(name=None, tag="", dir=None, file=None, meta="", xattr=b"")
+    defdir.file.append(definode)
+    defdir.dir.append(defdir)
+    deffile.dir.append(defdir)
+    for xname, x, defx in [
+        ("files", files, deffile),
+        ("inodes", inodes, definode),
+        ("dirs", dirs, defdir),
+    ]:
+        for xt, xm in x.items():
+            if len(xm) == 0:
+                if not (xname == "dirs" and xt == "root"):
+                    err(f"missing", xname, xt)
+                xm.append(defx)
+            elif len(xm) > 1:
+                err(f"duplicate", xname, xt + ":", *[xv.meta for xv in xm])
+                del xm[1:]
+
+    for f in dentries:
+        if f.dir.tag != f.file.dir.tag:
+            err("dentry dir is {f.dir.meta}, but file dir is {f.file.dir.meta}")
+        if f.xattr != f.file[0].xattr and f.xattr and f.file[0].xattr:
+            # not error if xattr is missing, because we've already reported that
+            err(
+                "direntry",
+                f.meta,
+                "and file",
+                f.file[0].meta,
+                "xattr don't match: len",
+                len(f.xattr),
+                "->",
+                str(len(f.file[0].meta))
+                + (hexdump(f.xattr) + "\n---" + hexdump(f.file[0].xattr))
+                if args.hexdump
+                else "",
+            )
+
+    return subdirs, dentries
+
+
+def lsdirs(tags):
+    def lsdir(name, tag, metas, xattr, parent=None, select="", top=None, depth=0):
         subs = tags.get(tag)
         if subs is None or depth > 100:
             if (name + "/").startswith(select):
@@ -503,11 +633,10 @@ def lsdirs(index):
                         nosub=True,
                         uids=Uids(),
                         inodes=[],
-                        xattr=array("B"),
+                        xattr=xattr,
                     )
                 ]
-            else:
-                return []
+            return []
         named = name + ("/" if name else "")
         this = Dir(
             name=name,
@@ -517,88 +646,42 @@ def lsdirs(index):
             nosub=False,
             uids=Uids(),
             inodes=[],
-            xattr=array("B"),
+            xattr=xattr,
         )
         dirs = [this] if (name + "/").startswith(select) else []
         tsubs = defaultdict(list)
         dsubs = defaultdict(list)
         for s in subs:
             if top is not None and s.name == top:
-                metas.extend(s.metas)
+                metas.extend([s.meta])
                 continue
             tsub = tsubs.setdefault((s.name, s.tag), [])
-            tsub.extend(s.metas)
+            tsub.extend([s.meta])
             if len(tsub) == 1:
                 dirs += lsdir(
                     name=named + s.name,
                     tag=s.tag,
                     metas=tsub,
+                    xattr=s.file[0].xattr,
                     parent=this,
                     select=select,
                     depth=depth + 1,
                 )
-            dsubs[s.name].append(s.metas)
+            dsubs[s.name].append(s.meta)
         for (d, t), mm in tsubs.items():
             if len(mm) > 1:
                 info(f"dir {named}{d} has multiple metadata:", " ".join(mm))
             dsubs.pop(d, None)
         for d, mm in dsubs.items():
             if len(mm) > 1:
-                info(f"dire {named}{d} has multiple tags:", " ".join(mm))
+                info(f"dir {named}{d} has multiple tags:", " ".join(mm))
         return dirs
-
-    tags = defaultdict(list)
-    with open(index, encoding="latin-1") as fin:
-        n = 0
-        lines = []
-        joined = None
-        for l in fin:
-            n += 1
-            line = l.rstrip("\n")
-            if line == "" or " " in line or "/" in line or n <= 1:
-                if joined is not None:
-                    info(joined)
-                    joined = None
-                if line != "":
-                    lines.append([line, n])
-            else:
-                last = lines[-1]
-                if joined is None:
-                    lastl, lastn = last
-                    joined = f"{index}:{lastn}: lines joined: {lastl}"
-                joined += f"\\n {line}"
-                last[0] += "\n" + line
-        if joined is not None:
-            info(joined)
-
-        for line, n in lines:
-            flds = line.split(" ", 1)
-            if not (len(flds) == 2 and "/" not in flds[0] and "/" in flds[-1]):
-                info(
-                    f"{index}:{n}: bad format [known issue]:", re.sub(r"\n", " ", line)
-                )
-                continue
-            tag, meta = flds
-            meta = re.sub(r"\n", " ", meta)
-            stag, sdir = meta.split("/")[-2:]
-            tags[stag].append(
-                Dir(
-                    name=sdir,
-                    tag=tag,
-                    metas=[meta],
-                    parent=None,  # not used here
-                    nosub=False,  # not used here
-                    uids=None,  # not used here
-                    inodes=None,  # not used here
-                    xattr=None,  # not used here
-                )
-            )
-        del lines
 
     dirs = lsdir(
         name="",
         tag="root",
         metas=[],
+        xattr=b"",
         top="root",
         select=args.root_dir + "/" if args.root_dir else "",
     )
@@ -606,96 +689,47 @@ def lsdirs(index):
 
     dirs = nodup(dirs, lambda d: (d.name, d.tag))  # unique tag/dir
 
-    tags = defaultdict(list)
-    for d in dirs:
-        tags[d.tag].append(d)
-    add_dir_xattr(tags)
     return dirs
 
 
-def add_dir_xattr(tags):
-    index = args.xattr_dir / "inodes.txt"
-    if not args.xattr:
-        return
-    with open(index, encoding="latin-1") as fin:
-        n = 0
-        for l in fin:
-            n += 1
-            meta = l.rstrip("\n")
-            if not meta:
-                continue
-            if " " in meta:
-                err(f"{index}:{n}: bad format:", meta)
-                continue
-            tag = meta.split("/")[-1]
-            dd = tags.get(tag)
-            if dd is None:
-                if not args.root_dir:
-                    info(f"inode {meta} has no dir")
-                continue
-            for d in dd:
-                d.inodes.append(meta)
-    for dd in tags.values():
-        for d in dd:
-            if not d.inodes:
-                err(f"dir {d.name} has no inode")
-                continue
-            if len(d.inodes) > 1:
-                info(f"dir {d.name} has multiple inodes", " ".join(d.inodes))
-            d.xattr.frombytes(getxattr(d.inodes[0]))
-
-
-def lsfiles2(index, dirs):
-    dtag = defaultdict(list)
+def lsfiles2(mfiles, dirs):
+    dtags = defaultdict(list)
     dlen = {}
     for d in dirs:
         dlen[d.tag] = 0
-        dtag[d.tag].append(d)
-    for t, dd in dtag.items():
+        dtags[d.tag].append(d)
+    for t, dd in dtags.items():
         if len(dd) != 1:
             err(f"multiple dirs for tag {t}:", " ".join([d.name for d in dd]))
 
     chunks = defaultdict(list)
 
     files = []
-    with open(index, encoding="latin-1") as fin:
-        n = 0
-        for l in fin:
-            n += 1
-            if args.max_files is not None and n > args.max_files:
-                break
-            w = l.rstrip("\n").split(" ", 1)
-            if not (len(w) == 2 and w[0].isdigit() and "/" in w[1]):
-                err(f"{index}:{n}: bad format:", line)
-                continue
-            tag, meta = w
-            ftag, fname = meta.split("/")[-2:]
-            if ftag == "#fSiDs#":
-                chunks[tag].append(
-                    Chunk(tag=fname, meta=meta, stors=[], xattr=array("B"))
+    for m in mfiles:
+        dtag = m.dir[0].tag
+        dd = dtags.get(dtag)
+        if not dd:
+            continue
+        dlen[dtag] += len(dd)
+        for d in dd:
+            files.append(
+                File(
+                    dir=d,
+                    name=m.name,
+                    tags=[m.tag],
+                    chunks=[
+                        Chunk(tag=f.tag, meta=f.meta, stors=[], xattr=f.xattr)
+                        for f in m.file
+                    ],
+                    empty=False,
+                    metas=[m.meta],
                 )
-            else:
-                dd = dtag.get(ftag)
-                if dd is not None:
-                    dlen[ftag] += len(dd)
-                    i = meta.rfind("/")
-                    xmeta = meta[:i] if i >= 0 else meta
-                    for d in dd:
-                        files.append(
-                            File(
-                                dir=d,
-                                name=fname,
-                                tags=[tag],
-                                chunks=chunks.setdefault(tag, []),
-                                empty=False,
-                                metas=[xmeta],
-                            )
-                        )
+            )
 
     if not args.no_empty_directories:
         for t, n in dlen.items():
             if n > 0:
-                dd = dtag.get(t)
+                dd = dtags.get(t)
                 for d in dd:
                     if d.nosub:
                         files.append(
@@ -729,12 +763,6 @@ def lsfiles(index, dirs):
             uextend(last.metas, f.metas)
             uextend(last.chunks, f.chunks, lambda c: c.tag)
     for f in ufiles:
-        if args.xattr:
-            # read xattr only for files in a selected directory
-            for c in f.chunks:
-                if not c.xattr:
-                    c.xattr.frombytes(getxattr(c.meta))
-
         if len(f.tags) > 1:
             info(
                 "file",
@@ -863,14 +891,10 @@ def list_metadata(f):
                 for c in f.chunks
                 if c.xattr
             )
-            if args.xattr
+            if not args.no_xattr
             else ""
         )
-        + (
-            "".join(["\n" + l for c in f.chunks for l in hexdump(c.xattr)])
-            if args.hexdump
-            else ""
-        )
+        + "".join([hexdump(c.xattr) for c in f.chunks])
     )
 
 
@@ -885,10 +909,10 @@ def list_dirs(dirs, out):
                 + " ".join(d.inodes)
                 + "\t"
                 + list_statinfo(d.xattr, d.name, getstat_inode)
-                if args.xattr
+                if not args.no_xattr
                 else ""
             )
-            + ("".join(["\n" + l for l in hexdump(d.xattr)]) if args.hexdump else ""),
+            + hexdump(d.xattr),
             file=out,
         )
 
@@ -960,7 +984,7 @@ def list_script(cfiles, out):
         fname = quote(str(dest / df))
         islink = False
         st = None
-        if args.xattr:
+        if not args.no_xattr:
             st = getstat(xattr, df)
             if st and len(ss) == 1:
                 islink = stat.S_ISLNK(st.st_mode)
@@ -1024,10 +1048,10 @@ def list_script(cfiles, out):
                 dname,
                 file=out,
             )
-        st = getstat_inode(d.xattr, d.name) if args.xattr and d.xattr else None
+        st = getstat_inode(d.xattr, d.name) if (not args.no_xattr) and d.xattr else None
         if st:
             print(f"chmod 0{stat.S_IMODE(st.st_mode):o}", dname, file=out)
-        if args.chown:  # and not args.xattr:
+        if args.chown:  # and not not args.no_xattr:
             if st:
                 print(f"chown -h {st.st_uid}:{st.st_gid}", dname, file=out)
             else:
@@ -1061,21 +1085,36 @@ def list_all(out):
         walk(args.xattr_dir, thisout())
         walk(args.xattr_dir, thisout(), typ="inodes")
 
-    if args.list_directories or args.list_files or args.list_chunks or args.script:
-        dirs = lsdirs(idir / "dir-metadata-index.txt")
+    subdirs, mfiles = lsmeta(idir / "meta.txt")
+
+    if args.list_meta:
+        for t, dd in subdirs.items():
+            print("dir " + t, " ".join([d.meta for d in dd]), sep="\t")
+
+        for m in mfiles:
+            print(
+                m.meta,
+                m.tag,
+                " ".join(d.meta for d in m.dir),
+                " ".join(f.meta for f in m.file),
+                str(len(m.xattr)) + hexdump(m.xattr),
+                sep="\t",
+            )
+
+    dirs = lsdirs(subdirs)
 
     if args.list_directories:
         list_dirs(dirs, thisout())
 
     if args.list_files or args.list_chunks or args.script:
-        files = lsfiles(idir / "file-metadata-index.txt", dirs)
+        files = lsfiles(mfiles, dirs)
         del dirs
 
     if args.list_files:
         list_files(files, thisout())
 
     if args.list_chunks or args.script:
-        cfiles = lschunks(idir / "storage-chunk-index.txt", files)
+        cfiles = lschunks(idir / "stor.txt", files)
         del files
 
     if args.list_chunks:
