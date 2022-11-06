@@ -1,61 +1,8 @@
 #!/usr/bin/env python3
 
-import sys, os, stat, pwd, grp, datetime, argparse, re, itertools, collections, binascii
+import sys, os, stat, pwd, grp, datetime, argparse, re, binascii
 from collections import defaultdict, namedtuple
 from pathlib import Path
-from array import array
-
-
-class Uids(set):
-    def __init__(self, s=set(), direct=False):
-        self.update(s)
-        self.direct = direct
-
-
-FileMeta = namedtuple("FileMeta", ["tag", "dir", "meta", "xattr"])
-DirMeta = namedtuple("DirMeta", ["name", "tag", "dir", "file", "meta", "xattr"])
-DentMeta = namedtuple(
-    "DentMeta", ["name", "tag", "dir", "file", "meta", "links", "xattr"]
-)
-InodeMeta = namedtuple("InodeMeta", ["tag", "meta", "xattr"])
-Dir = namedtuple(
-    "Dir", ["name", "tag", "metas", "nosub", "parent", "uids", "inodes", "xattr"]
-)  # defaults=["", "", [], False, None, Uids, [], array("B")]  # py3.7
-File = namedtuple(
-    "File",
-    ["dir", "name", "tag", "inode", "stors", "emptydir", "meta", "links", "xattr"],
-)  # defaults=[Dir(), "", [], [], False, [], [], b""] # py3.7
-FileStat = namedtuple("FileStat", ["name", "stat"])
-StatResult = namedtuple(
-    "StatResult",
-    [
-        "st_mode",
-        "st_nlink",
-        "st_uid",
-        "st_gid",
-        "st_size",
-        "st_atime",
-        "st_mtime",
-        "st_ctime",
-        "st_btime",
-    ],
-)
-# don't use "st_ino", "st_dev"
-
-server_decode = {
-    0x0259: "mercury006",
-    0x02BD: "mercury007",
-    0x0321: "mercury008",
-    0x0385: "mercury009",
-    0x03E9: "mercury010",
-    0x044D: "mercury011",
-}
-
-maxpath = 512
-args = None
-uids = {}
-gids = {}
-topdirs = {"root", "disposal", "mdisposal"}
 
 
 def parse_args():
@@ -64,8 +11,11 @@ def parse_args():
     prog = Path(sys.argv[0]).name
     parser = argparse.ArgumentParser(
         description=f"""
-Usage:
+Recovers files from a broken beegfs filesystem's metadata.
 
+## Recovering files
+
+```
 # Start with:
 #     /opt/ppd/scratch/data2_recovery/mercury???/meta.tgz
 #     /opt/ppd/scratch/data2_recovery/mercury???/storage/chunks/...
@@ -90,12 +40,26 @@ find mercury???/storage/chunks -type f > /scratch/adye/data2_recovery/stor.txt
 cd /scratch/adye/data2_recovery
 {prog} -w -o /scratch/adye/data2_recovery/meta.txt /scratch/adye/data2_recovery
 
-# Create copy.sh (with -O includes chown commands, which requires root):
+# Create copy.sh:
 cd /mercury/data2/restore
-{prog} -SO -o copy.sh -D restore -G /opt/ppd/scratch/data2_recovery /scratch/adye/data2_recovery
+{prog} -o copy.sh -D restore -G /opt/ppd/scratch/data2_recovery /scratch/adye/data2_recovery
+# With -O includes chown commands, which requires root.
+# With -S checks storage file sizes (slower).
+# With -x checks xattr metadata matches between dentries and file inodes (more RAM?)
 
 # Run copy.sh:
 ./copy.sh
+```
+
+## Notes
+
+* This script requires Python 3.6 or greater, as is default on CentOS7.
+
+* The final script (copy.sh in this example) uses the beegfs-merge-chunks script,
+executed from the same directory as this beegfs-metadata-ls.
+
+* If recovering a different filesystem from what I used, check the server_decode
+and (just to supress some error messages) topdirs below.
 """,
         formatter_class=argparse.RawTextHelpFormatter,
     )
@@ -154,6 +118,58 @@ cd /mercury/data2/restore
         args.no_xattr = False
     if args.storage_dir is None:
         args.storage_dir = args.dir
+
+
+class Uids(set):
+    def __init__(self, s=set(), direct=False):
+        self.update(s)
+        self.direct = direct
+
+
+FileMeta = namedtuple("FileMeta", ["tag", "dir", "meta", "xattr"])
+DirMeta = namedtuple("DirMeta", ["name", "tag", "dir", "file", "meta", "xattr"])
+DentMeta = namedtuple(
+    "DentMeta", ["name", "tag", "dir", "file", "meta", "links", "xattr"]
+)
+InodeMeta = namedtuple("InodeMeta", ["tag", "meta", "xattr"])
+Dir = namedtuple(
+    "Dir", ["name", "tag", "metas", "nosub", "parent", "uids", "inodes", "xattr"]
+)  # defaults=["", "", [], False, None, Uids, [], b""]  # py3.7
+File = namedtuple(
+    "File",
+    ["dir", "name", "tag", "inode", "stors", "emptydir", "meta", "links", "xattr"],
+)  # defaults=[Dir(), "", [], [], False, [], [], b""] # py3.7
+FileStat = namedtuple("FileStat", ["name", "stat"])
+StatResult = namedtuple(
+    "StatResult",
+    [
+        "st_mode",
+        "st_nlink",
+        "st_uid",
+        "st_gid",
+        "st_size",
+        "st_atime",
+        "st_mtime",
+        "st_ctime",
+        "st_btime",
+    ],  # don't use "st_ino", "st_dev"
+)
+
+
+server_decode = {
+    0x0259: "mercury006",
+    0x02BD: "mercury007",
+    0x0321: "mercury008",
+    0x0385: "mercury009",
+    0x03E9: "mercury010",
+    0x044D: "mercury011",
+}
+
+maxpath = 512
+args = None
+uids = {}
+gids = {}
+topdirs = {"root", "disposal", "mdisposal"}
 
 
 def err(*fargs, **fkwargs):
@@ -570,8 +586,6 @@ def lsmeta(index):
                 err(f"{index}:{n}: bad xattr in line:", line)
                 continue
             isdir = len(xattr) == 32
-            if args.no_xattr:
-                xattr = b""
             if "dentries" in p[2:4]:
                 xtag = gettag(xattr, meta)
                 dtag, ftag = p[-2:]
@@ -597,7 +611,12 @@ def lsmeta(index):
                     if isdir:
                         f = inodes.setdefault(xtag, [])
                         m = DirMeta(
-                            name=ftag, tag=xtag, dir=d, file=f, meta=meta, xattr=xattr
+                            name=ftag,
+                            tag=xtag,
+                            dir=d,
+                            file=f,
+                            meta=meta,
+                            xattr=xattr if not args.no_xattr else b"",
                         )
                         dirs[xtag].append(m)
                         subdirs[dtag].append(m)
@@ -610,7 +629,7 @@ def lsmeta(index):
                                 dir=d,
                                 file=f,
                                 meta=meta,
-                                xattr=xattr,
+                                xattr=xattr if not args.no_xattr else b"",
                                 links=[],
                             )
                         )
@@ -619,7 +638,11 @@ def lsmeta(index):
                 ftag = p[-1]
                 if xtag != ftag:
                     err(f"inode {meta} tag {ftag} does not match its xattr tag {xtag}")
-                inodes[ftag].append(InodeMeta(tag=ftag, meta=meta, xattr=xattr))
+                inodes[ftag].append(
+                    InodeMeta(
+                        tag=ftag, meta=meta, xattr=xattr if not args.no_xattr else b""
+                    )
+                )
             else:
                 err(f"{index}:{n}: file is not inodes or dentries:", line)
                 continue
@@ -888,9 +911,7 @@ def lschunks(index, files):
             if len(f.stors) == 0:
                 if args.user is None:
                     info(
-                        "file",
-                        dirfile(f.dir.name, f.name),
-                        f"chunk {f.tag} not found",
+                        "file", dirfile(f.dir.name, f.name), f"chunk {f.tag} not found"
                     )
             elif len(f.stors) > 1:
                 info(
@@ -1061,11 +1082,11 @@ def list_script(cfiles, out):
                     print(f"chmod 0{stat.S_IMODE(st.st_mode):o}", fname, file=out)
                 if args.chown:
                     guid = f"{st.st_uid}:{st.st_gid}"
-                    if not f.dir.xattr:
-                        f.dir.uids.add(guid)
-                        f.dir.uids.direct = True
+                    # if not f.dir.xattr:
+                    #     f.dir.uids.add(guid)
+                    #     f.dir.uids.direct = True
                     print("chown -h", guid, fname, file=out)
-            elif args.chown:
+            elif args.chown and args.no_xattr:
                 um = re.match(r"[^/]+/storage/chunks/u([\da-fA-F]+)/", ss[0])
                 if um:
                     guid = getugid(int(um.groups()[0], 16))
@@ -1086,7 +1107,7 @@ def list_script(cfiles, out):
         d = f.dir
         udirs.setdefault(d.name, d)
         while d.parent:
-            if not d.parent.xattr and not d.parent.uids.direct:
+            if args.no_xattr and not d.parent.xattr and not d.parent.uids.direct:
                 guids = getguids_dir(d)
                 if guids:
                     d.parent.uids.update(guids)
@@ -1105,27 +1126,29 @@ def list_script(cfiles, out):
                 dname,
                 file=out,
             )
-        st = getstat_inode(d.xattr, d.name) if (not args.no_xattr) and d.xattr else None
-        if st:
-            print(f"chmod 0{stat.S_IMODE(st.st_mode):o}", dname, file=out)
-        if args.chown:  # and not args.no_xattr:
+        if not args.no_xattr:
+            st = getstat_inode(d.xattr, d.name)
             if st:
-                print(f"chown -h {st.st_uid}:{st.st_gid}", dname, file=out)
+                print(f"chmod 0{stat.S_IMODE(st.st_mode):o}", dname, file=out)
+                if args.chown:
+                    print(f"chown -h {st.st_uid}:{st.st_gid}", dname, file=out)
             else:
-                if not d.uids:
-                    dp = d
-                    while dp.parent:
-                        dp = dp.parent
-                        guids = getguids_dir(dp)
-                        if guids:
-                            d.uids.update(guids)
-                            break
-                if d.uids:
-                    if len(d.uids) > 1:
-                        err("dir", d.name, "multiple uids:", " ".join(d.uids))
-                    print("chown -h", next(iter(d.uids)), dname, file=out)
-                else:
-                    err("dir", d.name, "has no UID")
+                err("dir", d.name, "has not mode or ownership info")
+        elif args.chown:
+            if not d.uids:
+                dp = d
+                while dp.parent:
+                    dp = dp.parent
+                    guids = getguids_dir(dp)
+                    if guids:
+                        d.uids.update(guids)
+                        break
+            if d.uids:
+                if len(d.uids) > 1:
+                    err("dir", d.name, "multiple uids:", " ".join(d.uids))
+                print("chown -h", next(iter(d.uids)), dname, file=out)
+            else:
+                err("dir", d.name, "has no UID")
 
 
 def list_all(out):
