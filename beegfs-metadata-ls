@@ -39,6 +39,7 @@ find mercury???/storage/chunks -type f > /scratch/adye/data2_recovery/stor.txt
 # Create meta.txt with all the metadata from the meta directories:
 cd /scratch/adye/data2_recovery
 {prog} -w -o /scratch/adye/data2_recovery/meta.txt /scratch/adye/data2_recovery
+# With -x checks xattr metadata matches between different server's instances of the same data (TO BE IMPLEMENTED)
 
 # Create copy.sh:
 cd /mercury/data2/restore
@@ -94,6 +95,7 @@ and (just to supress some error messages) topdirs below.
     parser.add_argument("-w", "--walk", action="store_true")
     parser.add_argument("-x", "--check-xattr", action="store_true")
     parser.add_argument("-n", "--max-files", type=int)
+    parser.add_argument("-N", "--max-depth", type=int, default=100)
     parser.add_argument("-r", "--root_dir", default="")
     parser.add_argument("-u", "--user")
     parser.add_argument("-o", "--output")
@@ -707,9 +709,9 @@ def lsmeta(index):
 def lsdirs(tags):
     def lsdir(name, tag, metas, xattr, parent=None, inode="", select="", top=None, depth=0):
         subs = tags.get(tag)
-        if subs is None or depth > 100:
+        if subs is None or depth > args.max_depth:
             if (name + "/").startswith(select):
-                if depth > 100:
+                if subs is not None:
                     err("directory too deep:", name)
                 return [
                     Dir(
@@ -780,6 +782,8 @@ def lsdirs(tags):
         if d.name in names:
             err("duplicate dir", d.name)
         names.add(d.name)
+
+    # print(dirs)
 
     # dirs = nodup(dirs, lambda d: (d.name, d.tag))  # unique tag/dir
 
