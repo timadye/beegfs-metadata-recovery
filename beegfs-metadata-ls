@@ -133,7 +133,7 @@ DentMeta = namedtuple(
 )
 InodeMeta = namedtuple("InodeMeta", ["tag", "meta", "xattr"])
 Dir = namedtuple(
-    "Dir", ["name", "tag", "metas", "nosub", "parent", "uids", "inodes", "xattr"]
+    "Dir", ["name", "tag", "metas", "nosub", "parent", "uids", "inode", "xattr"]
 )  # defaults=["", "", [], False, None, Uids, [], b""]  # py3.7
 File = namedtuple(
     "File",
@@ -333,6 +333,8 @@ def xattr_offset_inode(lxattr):
 
 
 def gettag(xattr, filename, offset_fun=xattr_offset):
+    if not xattr:
+        return ""
     itag, *_ = offset_fun(len(xattr))
     if itag is None:
         return ""
@@ -343,6 +345,8 @@ def gettag(xattr, filename, offset_fun=xattr_offset):
 
 
 def getservers(xattr, filename, minservers=2):
+    if not xattr:
+        return {}
     _, _, _, _, _, iserv = xattr_offset(len(xattr))
     if iserv is None or len(xattr) < iserv + 0x7E + 2 * minservers:
         err(f"file {filename} xattr length {len(xattr)} is too short")
@@ -488,18 +492,16 @@ def get_stors(f, info=False, abs=False):
     fname = dirfile(f.dir.name, f.name)
     files = [s for s in nodup(f.stors)]
     unsorted = len(files) > 1
-    if (not args.no_xattr) and unsorted and f.xattr:
+    if unsorted and not args.no_xattr:
         servers = getservers(f.xattr, fname)
         stfiles = [FileStat(s, servers.get(s.split("/")[0], -1)) for s in files]
         bad = [fs.name for fs in stfiles if fs.stat == -1]
         if bad:
-            err(
-                f"file {fname} no xattr for servers",
-                " ".join(bad),
-            )
-        stfiles.sort(key=lambda fs: fs.stat)
-        unsorted = False
-        files = [s.name for s in stfiles]
+            err(f"file {fname} no xattr for servers", " ".join(bad))
+        else:
+            stfiles.sort(key=lambda fs: fs.stat)
+            unsorted = False
+            files = [s.name for s in stfiles]
     if args.sizes and (info or unsorted or not args.no_xattr):
         idir = Path(args.dir)
         stfiles = [filestat(idir, s) for s in files]
@@ -676,8 +678,8 @@ def lsmeta(index):
         for f in ff:
             if f.dir[0].tag != f.file[0].dir[0].tag:
                 err("dentry dir is {f.dir.meta}, but file dir is {f.file.dir.meta}")
-            if f.xattr != f.file[0].xattr and f.xattr and f.file[0].xattr:
-                # not error if xattr is missing, because we've already reported that
+            if f.xattr and f.file[0].xattr and f.xattr != f.file[0].xattr:
+                # not error if xattr is missing - either not checking or already reported
                 err(
                     "direntry",
                     f.meta,
@@ -703,7 +705,7 @@ def lsmeta(index):
 
 
 def lsdirs(tags):
-    def lsdir(name, tag, metas, xattr, parent=None, select="", top=None, depth=0):
+    def lsdir(name, tag, metas, xattr, parent=None, inode="", select="", top=None, depth=0):
         subs = tags.get(tag)
         if subs is None or depth > 100:
             if (name + "/").startswith(select):
@@ -717,7 +719,7 @@ def lsdirs(tags):
                         parent=parent,
                         nosub=True,
                         uids=Uids(),
-                        inodes=[],
+                        inode=inode,
                         xattr=xattr,
                     )
                 ]
@@ -730,7 +732,7 @@ def lsdirs(tags):
             parent=parent,
             nosub=False,
             uids=Uids(),
-            inodes=[],
+            inode=inode,
             xattr=xattr,
         )
         dirs = [this] if (name + "/").startswith(select) else []
@@ -749,6 +751,7 @@ def lsdirs(tags):
                     metas=tsub,
                     xattr=s.file[0].xattr,
                     parent=this,
+                    inode=s.file[0].meta,
                     select=select,
                     depth=depth + 1,
                 )
@@ -963,7 +966,12 @@ def list_metadata(f):
 
 def list_meta(subdirs, mfiles, out):
     for t, dd in subdirs.items():
-        print("dir " + t, " ".join([d.meta for d in dd]), sep="\t", file=out)
+        print(
+            "dir " + t,
+            " ".join([d.meta for d in dd]),
+            sep="\t",
+            file=out,
+        )
 
     for m in mfiles:
         print(
@@ -985,7 +993,7 @@ def list_dirs(dirs, out):
             + ("\t" + " ".join(d.metas) if args.metadata else "")
             + (
                 "\t"
-                + " ".join(d.inodes)
+                + d.inode
                 + "\t"
                 + list_statinfo(d.xattr, d.name, getstat_inode)
                 if not args.no_xattr
@@ -1054,6 +1062,7 @@ def list_script(cfiles, out):
 
         for df, ss in ff:
             fname = quote(str(dest / df))
+            sfiles = [quote(str(sdir / s)) for s in ss]
             issymlink = False
             st = None
             if not args.no_xattr:
@@ -1064,17 +1073,12 @@ def list_script(cfiles, out):
                         err("symlink {fname} target length is", st.st_size)
                         # issymlink = False   # actually a valid symlink
             if issymlink:
-                print(f'ln -sT "$(< {quote(str(sdir / ss[0]))})"', fname, file=out)
+                print(f'ln -sT "$(< {sfiles[0]})"', fname, file=out)
+                print("touch -hr", sfiles[0], fname, file=out)
             elif len(ss) == 1:
-                print(args.command, quote(str(sdir / ss[0])), fname, file=out)
+                print(args.command, sfiles[0], fname, file=out)
             else:
-                print(
-                    args.merge_command,
-                    "-o",
-                    fname,
-                    " ".join([quote(str(sdir / s)) for s in ss]),
-                    file=out,
-                )
+                print(args.merge_command, "-o", fname, " ".join(sfiles), file=out)
             if st:
                 if not issymlink and not args.symlink:
                     # chmod doesn't apply to symlinks, so don't use this if args.command made a symlink.
@@ -1117,10 +1121,10 @@ def list_script(cfiles, out):
     for d in udirs.values():
         dname = quote(str(dest / d.name))
         if len(d.metas) == 1:
-            print("touch -r", quote(str(idir / d.metas[0])), dname, file=out)
+            print("touch -hr", quote(str(idir / d.metas[0])), dname, file=out)
         elif len(d.metas) > 1:
             print(
-                "touch -r $(ls -1dt",
+                "touch -hr $(ls -1dt",
                 " ".join([quote(str(idir / m)) for m in d.metas]),
                 "| head -1)",
                 dname,
@@ -1133,7 +1137,7 @@ def list_script(cfiles, out):
                 if args.chown:
                     print(f"chown -h {st.st_uid}:{st.st_gid}", dname, file=out)
             else:
-                err("dir", d.name, "has not mode or ownership info")
+                err("dir", d.name, "has no mode or ownership info")
         elif args.chown:
             if not d.uids:
                 dp = d
