@@ -39,7 +39,7 @@ find mercury???/storage/chunks -type f > /scratch/adye/data2_recovery/stor.txt
 # Create meta.txt with all the metadata from the meta directories:
 cd /scratch/adye/data2_recovery
 {prog} -w -o /scratch/adye/data2_recovery/meta.txt /scratch/adye/data2_recovery
-# With -x checks xattr metadata matches between different server's instances of the same data (TO BE IMPLEMENTED)
+# With -x checks xattr metadata matches between different server's instances of the same data
 
 # Create copy.sh:
 cd /mercury/data2/restore
@@ -539,7 +539,7 @@ def b2str(b):
 
 def walk(idir, out, typ="dentries"):
     n = 0
-    seen = set()
+    seen = {}
     for dentries in ["*/meta/" + typ, "*/meta/buddymir/" + typ]:
         for d in idir.glob(dentries):
             for root, dirs, files in os.walk(bytes(str(d), "utf-8")):
@@ -548,17 +548,47 @@ def walk(idir, out, typ="dentries"):
                     fname = b2str(bfname)
                     f = proot / fname
                     name = str(f.relative_to(d))
-                    if name in seen:
-                        continue
-                    n += 1
-                    if args.max_files is not None and n > args.max_files:
-                        return
-                    meta = str(f.relative_to(idir))
-                    xattr = getxattr(root + b"/" + bfname)
-                    if not xattr:
-                        err(f"file {meta} has no xattr")
-                        continue
-                    seen.add(name)
+                    if args.check_xattr:
+                        meta = str(f.relative_to(idir))
+                        xattr = getxattr(root + b"/" + bfname)
+                        if not xattr:
+                            err(f"file {meta} has no xattr")
+                            continue
+                        last = seen.get(name)
+                        if last is not None:
+                            if xattr != last[1]:
+                                err(
+                                    "files",
+                                    last[0],
+                                    "and",
+                                    meta,
+                                    "xattr don't match: len",
+                                    len(last[1]),
+                                    "->",
+                                    str(len(xattr))
+                                    + (
+                                        hexdump(last[1]) + "\n---" + hexdump(xattr)
+                                        if args.hexdump
+                                        else ""
+                                    ),
+                                )
+                            continue
+                        n += 1
+                        if args.max_files is not None and n > args.max_files:
+                            return
+                        seen[name] = (meta, xattr)
+                    else:
+                        if name in seen:
+                            continue
+                        n += 1
+                        if args.max_files is not None and n > args.max_files:
+                            return
+                        meta = str(f.relative_to(idir))
+                        xattr = getxattr(root + b"/" + bfname)
+                        if not xattr:
+                            err(f"file {meta} has no xattr")
+                            continue
+                        seen[name] = None
                     print(meta + "\t" + xattr.hex(), file=out)
 
 
@@ -591,12 +621,15 @@ def lsmeta(index):
                 continue
             isdir = len(xattr) == 32
             if "dentries" in p[2:4]:
-                xtag = gettag(xattr, meta)
                 dtag, ftag = p[-2:]
                 if dtag == "#fSiDs#":
-                    if xtag != ftag:
-                        err(f"file {meta} tag {ftag} does not match xattr tag {xtag}")
                     dtag = p[-3]
+                    if args.check_xattr:
+                        xtag = gettag(xattr, meta)
+                        if xtag != ftag:
+                            err(
+                                f"file {meta} tag {ftag} does not match xattr tag {xtag}"
+                            )
                     d = dirs.setdefault(dtag, [])
                     files[ftag].append(
                         FileMeta(
@@ -611,9 +644,12 @@ def lsmeta(index):
                         )
                     )
                 else:
+                    xtag = gettag(xattr, meta)
                     d = dirs.setdefault(dtag, [])
                     if isdir:
                         f = inodes.setdefault(xtag, [])
+                        if dtag == "root" and ftag == "root":
+                            xtag, dtag, ftag = "root", "", ""
                         m = DirMeta(
                             name=ftag,
                             tag=xtag,
@@ -638,10 +674,13 @@ def lsmeta(index):
                             )
                         )
             elif "inodes" in p[2:4]:
-                xtag = gettag(xattr, meta, offset_fun=xattr_offset_inode)
                 ftag = p[-1]
-                if xtag != ftag:
-                    err(f"inode {meta} tag {ftag} does not match its xattr tag {xtag}")
+                if args.check_xattr:
+                    xtag = gettag(xattr, meta, offset_fun=xattr_offset_inode)
+                    if xtag != ftag:
+                        err(
+                            f"inode {meta} tag {ftag} does not match its xattr tag {xtag}"
+                        )
                 inodes[ftag].append(
                     InodeMeta(
                         tag=ftag, meta=meta, xattr=xattr if not args.no_xattr else b""
@@ -664,8 +703,7 @@ def lsmeta(index):
     ]:
         for xt, xm in x.items():
             if len(xm) == 0:
-                if not (xname == "dirs" and xt in topdirs):
-                    err(f"missing", xname, xt)
+                err(f"missing", xname, xt)
                 xm.append(defx)
             elif len(xm) > 1:
                 err(f"duplicate", xname, xt + ":", *[xv.meta for xv in xm])
@@ -691,9 +729,11 @@ def lsmeta(index):
                     len(f.xattr),
                     "->",
                     str(len(f.file[0].meta))
-                    + (hexdump(f.xattr) + "\n---" + hexdump(f.file[0].xattr))
-                    if args.hexdump
-                    else "",
+                    + (
+                        hexdump(f.xattr) + "\n---" + hexdump(f.file[0].xattr)
+                        if args.hexdump
+                        else ""
+                    ),
                 )
         if len(ff) > 1:
             info(
@@ -707,10 +747,14 @@ def lsmeta(index):
 
 
 def lsdirs(tags):
-    def lsdir(name, tag, metas, xattr, parent=None, inode="", select="", top=None, depth=0):
+    def lsdir(
+        name, tag, metas=[], xattr=b"", parent=None, inode="", top=False, depth=0
+    ):
+        select = args.root_dir + "/" if args.root_dir else ""
+        named = name + "/" if name else ""
         subs = tags.get(tag)
         if subs is None or depth > args.max_depth:
-            if (name + "/").startswith(select):
+            if named.startswith(select):
                 if subs is not None:
                     err("directory too deep:", name)
                 return [
@@ -726,7 +770,6 @@ def lsdirs(tags):
                     )
                 ]
             return []
-        named = name + ("/" if name else "")
         this = Dir(
             name=name,
             tag=tag,
@@ -737,13 +780,10 @@ def lsdirs(tags):
             inode=inode,
             xattr=xattr,
         )
-        dirs = [this] if (name + "/").startswith(select) else []
+        dirs = [this] if not top and named.startswith(select) else []
         tsubs = defaultdict(list)
         dsubs = defaultdict(list)
         for s in subs:
-            if top is not None and s.name == top:
-                metas.extend([s.meta])
-                continue
             tsub = tsubs.setdefault((s.name, s.tag), [])
             tsub.extend([s.meta])
             if len(tsub) == 1:
@@ -754,7 +794,6 @@ def lsdirs(tags):
                     xattr=s.file[0].xattr,
                     parent=this,
                     inode=s.file[0].meta,
-                    select=select,
                     depth=depth + 1,
                 )
             dsubs[s.name].append(s.meta)
@@ -767,14 +806,7 @@ def lsdirs(tags):
                 info(f"dir {named}{d} has multiple tags:", " ".join(mm))
         return dirs
 
-    dirs = lsdir(
-        name="",
-        tag="root",
-        metas=[],
-        xattr=b"",
-        top="root",
-        select=args.root_dir + "/" if args.root_dir else "",
-    )
+    dirs = lsdir(name="", tag="", top=True)
     del tags
 
     names = set()
@@ -782,8 +814,6 @@ def lsdirs(tags):
         if d.name in names:
             err("duplicate dir", d.name)
         names.add(d.name)
-
-    # print(dirs)
 
     # dirs = nodup(dirs, lambda d: (d.name, d.tag))  # unique tag/dir
 
@@ -996,10 +1026,7 @@ def list_dirs(dirs, out):
             + ("\t" + d.tag if args.tags else "")
             + ("\t" + " ".join(d.metas) if args.metadata else "")
             + (
-                "\t"
-                + d.inode
-                + "\t"
-                + list_statinfo(d.xattr, d.name, getstat_inode)
+                "\t" + d.inode + "\t" + list_statinfo(d.xattr, d.name, getstat_inode)
                 if not args.no_xattr
                 else ""
             )
