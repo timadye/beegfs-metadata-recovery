@@ -129,7 +129,7 @@ class Uids(set):
 
 
 FileMeta = namedtuple("FileMeta", ["tag", "dir", "meta", "xattr"])
-DirMeta = namedtuple("DirMeta", ["name", "tag", "dir", "file", "meta", "xattr"])
+DirMeta = namedtuple("DirMeta", ["name", "tag", "dir", "inode", "meta", "xattr"])
 DentMeta = namedtuple(
     "DentMeta", ["name", "tag", "dir", "file", "meta", "links", "xattr"]
 )
@@ -647,14 +647,14 @@ def lsmeta(index):
                     xtag = gettag(xattr, meta)
                     d = dirs.setdefault(dtag, [])
                     if isdir:
-                        f = inodes.setdefault(xtag, [])
+                        inode = inodes.setdefault(xtag, [])
                         if dtag == "root" and ftag == "root":
                             xtag, dtag, ftag = "root", "", ""
                         m = DirMeta(
                             name=ftag,
                             tag=xtag,
                             dir=d,
-                            file=f,
+                            inode=inode,
                             meta=meta,
                             xattr=xattr if not args.no_xattr else b"",
                         )
@@ -690,10 +690,10 @@ def lsmeta(index):
                 err(f"{index}:{n}: file is not inodes or dentries:", line)
                 continue
 
-    defdir = DirMeta(name="", tag="", dir=[], file=[], meta="", xattr=b"")
+    defdir = DirMeta(name="", tag="", dir=[], inode=[], meta="", xattr=b"")
     deffile = FileMeta(tag="", dir=[], meta="", xattr=b"")
     definode = InodeMeta(tag="", meta="", xattr=b"")
-    defdir.file.append(definode)
+    defdir.inode.append(definode)
     defdir.dir.append(defdir)
     deffile.dir.append(defdir)
     for xname, x, defx in [
@@ -791,9 +791,9 @@ def lsdirs(tags):
                     name=named + s.name,
                     tag=s.tag,
                     metas=tsub,
-                    xattr=s.file[0].xattr,
+                    xattr=s.inode[0].xattr,
                     parent=this,
-                    inode=s.file[0].meta,
+                    inode=s.inode[0].meta,
                     depth=depth + 1,
                 )
             dsubs[s.name].append(s.meta)
