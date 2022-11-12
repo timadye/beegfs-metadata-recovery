@@ -129,7 +129,7 @@ class Uids(set):
 
 
 FileMeta = namedtuple("FileMeta", ["tag", "dir", "meta", "xattr"])
-DirMeta = namedtuple("DirMeta", ["name", "tag", "dir", "inode", "meta", "xattr"])
+DirMeta = namedtuple("DirMeta", ["name", "tag", "inode", "meta", "xattr"])
 DentMeta = namedtuple(
     "DentMeta", ["name", "tag", "dir", "file", "meta", "links", "xattr"]
 )
@@ -645,15 +645,16 @@ def lsmeta(index):
                     )
                 else:
                     xtag = gettag(xattr, meta)
-                    d = dirs.setdefault(dtag, [])
                     if isdir:
                         inode = inodes.setdefault(xtag, [])
                         if dtag == "root" and ftag == "root":
+                            # move root directory from being a subdirectory of itself to
+                            # be a subdirectory of a directory with tag "".
+                            # This gives it a place where lsdirs can find it in subdirs.
                             xtag, dtag, ftag = "root", "", ""
-                        m = DirMeta(
+                        m = DirMeta(  # NB. don't need parent dir here
                             name=ftag,
                             tag=xtag,
-                            dir=d,
                             inode=inode,
                             meta=meta,
                             xattr=xattr if not args.no_xattr else b"",
@@ -662,6 +663,7 @@ def lsmeta(index):
                         subdirs[dtag].append(m)
                     else:
                         f = files.setdefault(xtag, [])
+                        d = dirs.setdefault(dtag, [])
                         dentries[xtag].append(
                             DentMeta(
                                 name=ftag,
@@ -690,11 +692,10 @@ def lsmeta(index):
                 err(f"{index}:{n}: file is not inodes or dentries:", line)
                 continue
 
-    defdir = DirMeta(name="", tag="", dir=[], inode=[], meta="", xattr=b"")
+    defdir = DirMeta(name="", tag="", inode=[], meta="", xattr=b"")
     deffile = FileMeta(tag="", dir=[], meta="", xattr=b"")
     definode = InodeMeta(tag="", meta="", xattr=b"")
     defdir.inode.append(definode)
-    defdir.dir.append(defdir)
     deffile.dir.append(defdir)
     for xname, x, defx in [
         ("files", files, deffile),
