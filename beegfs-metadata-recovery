@@ -56,8 +56,8 @@ cd /mercury/data2/restore
 
 * This script requires Python 3.6 or greater, as is default on CentOS7.
 
-* The final script (copy.sh in this example) uses the beegfs-merge-chunks script,
-executed from the same directory as this beegfs-metadata-ls.
+* The final script (copy.sh in this example) uses the `beegfs-merge-chunks` script,
+executed from the same directory as this `beegfs-metadata-recovery`.
 
 * If recovering a different filesystem from what I used, check the server_decode
 and (just to supress some error messages) topdirs below.
