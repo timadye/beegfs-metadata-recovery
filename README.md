@@ -43,8 +43,8 @@ beegfs-metadata-recovery -o copy.sh -D restore -G /opt/ppd/scratch/data2_recover
 
 * This script requires Python 3.6 or greater, as is default on CentOS7.
 
-* The final script (copy.sh in this example) uses the `beegfs-merge-chunks` script,
+* The final script (`copy.sh` in this example) uses the `beegfs-merge-chunks` script,
 executed from the same directory as this `beegfs-metadata-recovery`.
 
-* If recovering a different filesystem from what I used, check the server_decode
-and (just to supress some error messages) topdirs below.
+* If recovering a different filesystem from what I used, check the `server_decode`
+and (just to supress some error messages) `topdirs` in `beegfs-metadata-recovery`.
