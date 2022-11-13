@@ -25,12 +25,12 @@ find mercury???/storage/chunks -type f > /scratch/adye/data2_recovery/stor.txt
 
 # Create meta.txt with all the metadata from the meta directories:
 cd /scratch/adye/data2_recovery
-{prog} -w -o /scratch/adye/data2_recovery/meta.txt /scratch/adye/data2_recovery
+beegfs-metadata-recovery -w -o /scratch/adye/data2_recovery/meta.txt /scratch/adye/data2_recovery
 # With -x checks xattr metadata matches between different server's instances of the same data
 
 # Create copy.sh:
 cd /mercury/data2/restore
-{prog} -o copy.sh -D restore -G /opt/ppd/scratch/data2_recovery /scratch/adye/data2_recovery
+beegfs-metadata-recovery -o copy.sh -D restore -G /opt/ppd/scratch/data2_recovery /scratch/adye/data2_recovery
 # With -O includes chown commands, which requires root.
 # With -S checks storage file sizes (slower).
 # With -x checks xattr metadata matches between dentries and file inodes (more RAM?)
