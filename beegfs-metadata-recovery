@@ -14,9 +14,9 @@ def parse_args():
 Recovers files from a broken beegfs filesystem's metadata.
 
 # Start with:
-#     /opt/ppd/scratch/data2_recovery/mercury???/meta.tgz
-#     /scratch/adye/data2_recovery/stor.txt
+#     /opt/ppd/scratch/data2_recovery/mercury???/meta/...
 #     /opt/ppd/scratch/data2_recovery/mercury???/storage/chunks/...
+#     /scratch/adye/data2_recovery/stor.txt
 
 # Create meta.txt with all the metadata from the meta directories:
 {prog} -w -o /scratch/adye/data2_recovery/meta.txt /scratch/adye/data2_recovery
@@ -71,6 +71,12 @@ and (just to supress some error messages) topdirs below.
     )
     parser.add_argument("-w", "--walk", action="store_true")
     parser.add_argument("-x", "--check-xattr", action="store_true")
+    parser.add_argument(
+        "-i",
+        "--use-inodes",
+        action="store_true",
+        help="Use inode hard links in #fSiDs# directories",
+    )
     parser.add_argument("-n", "--max-files", type=int)
     parser.add_argument("-N", "--max-depth", type=int, default=100)
     parser.add_argument("-r", "--root_dir", default="")
@@ -116,7 +122,7 @@ Dir = namedtuple(
 )  # defaults=["", "", [], False, None, Uids, [], b""]  # py3.7
 File = namedtuple(
     "File",
-    ["dir", "name", "tag", "inode", "stors", "emptydir", "meta", "links", "xattr"],
+    ["dir", "name", "tag", "stors", "emptydir", "meta", "links", "xattr"],
 )  # defaults=[Dir(), "", [], [], False, [], [], b""] # py3.7
 FileStat = namedtuple("FileStat", ["name", "stat"])
 StatResult = namedtuple(
@@ -520,6 +526,8 @@ def walk(idir, out, typ="dentries"):
     for dentries in ["*/meta/" + typ, "*/meta/buddymir/" + typ]:
         for d in idir.glob(dentries):
             for root, dirs, files in os.walk(bytes(str(d), "utf-8")):
+                if not args.use_inodes and b"#fSiDs#" in dirs:
+                    dirs.remove(b"#fSiDs#")
                 proot = Path(b2str(root))
                 for bfname in files:
                     fname = b2str(bfname)
@@ -600,6 +608,8 @@ def lsmeta(index):
             if "dentries" in p[2:4]:
                 dtag, ftag = p[-2:]
                 if dtag == "#fSiDs#":
+                    if not args.use_inodes:
+                        continue
                     dtag = p[-3]
                     if args.check_xattr:
                         xtag = gettag(xattr, meta)
@@ -639,7 +649,7 @@ def lsmeta(index):
                         dirs[xtag].append(m)
                         subdirs[dtag].append(m)
                     else:
-                        f = files.setdefault(xtag, [])
+                        f = files.setdefault(xtag, []) if args.use_inodes else None
                         d = dirs.setdefault(dtag, [])
                         dentries[xtag].append(
                             DentMeta(
@@ -693,26 +703,27 @@ def lsmeta(index):
 
     dlist = []
     for ff in dentries.values():
-        for f in ff:
-            if f.dir[0].tag != f.file[0].dir[0].tag:
-                err("dentry dir is {f.dir.meta}, but file dir is {f.file.dir.meta}")
-            if f.xattr and f.file[0].xattr and f.xattr != f.file[0].xattr:
-                # not error if xattr is missing - either not checking or already reported
-                err(
-                    "direntry",
-                    f.meta,
-                    "and file",
-                    f.file[0].meta,
-                    "xattr don't match: len",
-                    len(f.xattr),
-                    "->",
-                    str(len(f.file[0].meta))
-                    + (
-                        hexdump(f.xattr) + "\n---" + hexdump(f.file[0].xattr)
-                        if args.hexdump
-                        else ""
-                    ),
-                )
+        if args.use_inodes:
+            for f in ff:
+                if f.dir[0].tag != f.file[0].dir[0].tag:
+                    err("dentry dir is {f.dir.meta}, but file dir is {f.file.dir.meta}")
+                if f.xattr and f.file[0].xattr and f.xattr != f.file[0].xattr:
+                    # not error if xattr is missing - either not checking or already reported
+                    err(
+                        "direntry",
+                        f.meta,
+                        "and file",
+                        f.file[0].meta,
+                        "xattr don't match: len",
+                        len(f.xattr),
+                        "->",
+                        str(len(f.file[0].meta))
+                        + (
+                            hexdump(f.xattr) + "\n---" + hexdump(f.file[0].xattr)
+                            if args.hexdump
+                            else ""
+                        ),
+                    )
         if len(ff) > 1:
             info(
                 "file {ff[0].tag} has multiple dentries (hard link):",
@@ -812,16 +823,14 @@ def lsfiles(mfiles, dirs):
     for m in mfiles:
         for d in dtags.get(m.dir[0].tag, []):
             dlen[d.tag] += 1
-            f = m.file[0]
             files.append(
                 File(
                     dir=d,
                     name=m.name,
                     tag=m.tag,
-                    inode=f.meta,
                     stors=[],
                     emptydir=False,
-                    meta=m.meta,
+                    meta=m.file[0].meta if args.use_inodes else m.meta,
                     links=[
                         dirfile(fd.name, l.name)
                         for l in m.links
@@ -841,7 +850,6 @@ def lsfiles(mfiles, dirs):
                                 dir=d,
                                 name="",
                                 tag="",
-                                inode="",
                                 stors=[],
                                 emptydir=True,
                                 meta="",
@@ -867,7 +875,7 @@ def lsfiles(mfiles, dirs):
                 df,
                 "has multiple tags:",
                 " ".join(f.tag for f in ff) + ", inodes:",
-                " ".join(f.inode for f in ff),
+                " ".join(f.meta for f in ff),
             )
             del ff[1:]
     return [ff[0] for ff in dfiles.values()]
@@ -886,7 +894,7 @@ def lschunks(index, files):
     ctags = defaultdict(list)
     empty = []
     for f in files:
-        if f.emptydir or f.inode == "":
+        if f.emptydir or f.meta == "":
             empty.append(f)
             if not f.emptydir:
                 info("empty file:", dirfile(f.dir.name, f.name))
@@ -961,7 +969,7 @@ def list_statinfo(xattr, fname, getstat_fun=getstat):
 def list_metadata(f):
     return (
         (
-            ("\t" + " ".join(f.dir.metas) + "\t" + f.inode if args.metadata else "")
+            ("\t" + " ".join(f.dir.metas) + "\t" + f.meta if args.metadata else "")
             + (
                 "\t" + list_statinfo(f.xattr, dirfile(f.dir.name, f.name))
                 if f.xattr
@@ -990,7 +998,7 @@ def list_meta(subdirs, mfiles, out):
             m.meta,
             m.tag,
             " ".join(d.meta for d in m.dir),
-            " ".join(f.meta for f in m.file),
+            " ".join(f.meta for f in m.file) if args.use_inodes else "",
             str(len(m.xattr)) + hexdump(m.xattr),
             sep="\t",
             file=out,
@@ -1062,7 +1070,7 @@ def list_script(cfiles, out):
         stor = get_stors(f)
         ff = []
         if not stor:
-            ff.append((dfname, [f.inode]))
+            ff.append((dfname, [f.meta]))
         elif not args.no_merge or len(stor) == 1:
             ff.append((dfname, stor))
         else:

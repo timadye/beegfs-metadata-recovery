@@ -3,9 +3,10 @@
 ## Recovering files
 
 ```
-# Start with:
-#     /opt/ppd/scratch/data2_recovery/mercury???/meta.tgz
-#     /opt/ppd/scratch/data2_recovery/mercury???/storage/chunks/...
+# On each metadata server (mercury???), extract metadata to shared disk:
+tar -C /beegfs --xattrs -zcf /opt/ppd/scratch/data2_recovery/mercury???/meta.tgz meta
+# On each storage server (mercury???), extract storage to shared disk:
+cp -a /beegfs/storage/chunks /opt/ppd/scratch/data2_recovery/mercury???/storage/chunks/
 
 # Extract the metadata files to a local disk, so they keep their xattr:
 cd /scratch/adye/data2_recovery
@@ -14,10 +15,10 @@ for d in mercury???; do cp -pi /opt/ppd/scratch/data2_recovery/$d/meta.tgz $d/; 
 for d in mercury???; do (set -x; cd $d; tar --xattrs -zxf meta.tgz); done
 
 # Creates directories:
-#     mercury00?/meta/dentries
-#     mercury00?/meta/buddymir/dentries
-#     mercury00?/meta/inodes
-#     mercury00?/meta/buddymir/inodes
+#     mercury???/meta/dentries
+#     mercury???/meta/buddymir/dentries
+#     mercury???/meta/inodes
+#     mercury???/meta/buddymir/inodes
 
 # Create stor.txt with the list of storage chunks:
 cd /opt/ppd/scratch/data2_recovery
