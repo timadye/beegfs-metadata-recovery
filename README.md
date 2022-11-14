@@ -1,4 +1,4 @@
-`beegfs-metadata-recovery` recovers files from a broken beegfs filesystem's metadata.
+`beegfs-metadata-recovery` recovers files from a broken BeeGFS filesystem's metadata.
 
 ## Recovering files
 
