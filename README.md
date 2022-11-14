@@ -20,10 +20,12 @@
     for d in mercury???; do (set -x; cd $d; tar --xattrs -zxf meta.tgz); done
     ```
     * Creates directories:
-        * `mercury???/meta/dentries`
-        * `mercury???/meta/buddymir/dentries`
-        * `mercury???/meta/inodes`
-        * `mercury???/meta/buddymir/inodes`
+        ```
+        mercury???/meta/dentries
+        mercury???/meta/buddymir/dentries
+        mercury???/meta/inodes
+        mercury???/meta/buddymir/inodes
+        ```
 
 4. Create `stor.txt` with the list of storage chunks:
     ```
