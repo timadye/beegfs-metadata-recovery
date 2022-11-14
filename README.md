@@ -2,17 +2,19 @@
 
 ## Recovering files
 
+This procedure was used to recover all 8TB of data from a 32TB BeeGFS filesystem. The system was configured with 6 storage servers (called `mercury006` to `mercury011`) with replicated metadata distributed on the same servers.
+
 1. On each metadata server (`mercury???`), extract metadata to shared disk:
     ```
     tar -C /beegfs --xattrs -zcf /opt/ppd/scratch/data2_recovery/mercury???/meta.tgz meta
     ```
 
-2. On each storage server (mercury???), extract storage to shared disk:
+2. On each storage server (`mercury???`), extract storage to shared disk:
     ```
     cp -a /beegfs/storage/chunks /opt/ppd/scratch/data2_recovery/mercury???/storage/chunks/
     ```
 
-3. Extract the metadata files to a local disk, so they keep their xattr:
+3. Extract the metadata files to a local disk - or anything that can keep xattr:
     ```
     cd /scratch/adye/data2_recovery
     mkdir $(cd /opt/ppd/scratch/data2_recovery; ls -1d mercury???)
