@@ -3,7 +3,9 @@
 
 This procedure was used to recover all 8TB of data from a 32TB BeeGFS filesystem. The system was configured with 6 storage servers (called `mercury006` to `mercury011`) with replicated metadata distributed on the same servers.
 
-We developed these scripts from examination of the BeeGFS filesystem metadata of the particular system we needed to recover. We were not aware of any documentation for the BeeGFS metadata structures, so we may not cover all cases. The terminology used here probably isn't correct. We have not tested the procedure on any other system.
+All regular files (including those stored across multiple servers), directories (including empty directories), soft links, and hard links were all successfully recovered with most of the usual `stat` information: ownership (`chown`), permissions bits (`chmod`), and modification time (`touch`; other time fields are also recovered but may not be preserved by subsequent operations).
+
+We developed these scripts from examination of the BeeGFS filesystem metadata of the particular system we needed to recover. We were not aware of any documentation for the BeeGFS metadata structures, so may not have covered all cases. We have not tested the procedure on any other system. The terminology used here probably isn't correct.
 
 * One issue that is bound to come up with another system is the codes used to identify the order file data is written to different servers. The codes are stored in the file's inode xattr. We don't know how the codes are assigned to each server. You will have to change `server_decode` dict in `beegfs-metadata-recovery` accordingly. This maps the codes stored in the xattr data to the server name (actually the name of the subdirectory where each server's file data is stored).
 
