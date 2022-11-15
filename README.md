@@ -80,3 +80,5 @@ Here is the procedure we used.
 ## Notes
 
 * This script requires Python 3.6 or greater, as is default on CentOS7.
+
+* The script is cluttered with lots of code and options that were useful while we investigated how to recover the data, but now are less useful. Still, if you need to make investigations of your own, the `-d` (list dirs), `-f` (list files), `-c` (list storage chunks), `-H` show hex dump of xattr block, and other options may be helpful.
