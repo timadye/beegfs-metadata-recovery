@@ -3,7 +3,7 @@
 
 This procedure was used to recover all 8TB of data from a 32TB BeeGFS filesystem. The system was configured with 6 storage servers (called `mercury006` to `mercury011`) with replicated metadata distributed on the same servers.
 
-All regular files (including those stored across multiple servers), directories (including empty directories), soft links, and hard links were all successfully recovered with most of the usual `stat` information: ownership (`chown`), permissions bits (`chmod`), and modification time (`touch`; other time fields are also recovered but may not be preserved by subsequent operations).
+All regular files (including those stored across multiple servers), directories (including empty directories), soft links, and hard links were all successfully recovered with most of the usual `stat` information: ownership (`chown`), permissions bits (`chmod`), and modification time (`touch`; other time fields are also recovered but may not be preserved by subsequent operations). Files and directories with UTF-8 names are correctly restored.
 
 We developed these scripts from examination of the BeeGFS filesystem metadata of the particular system we needed to recover. We were not aware of any documentation for the BeeGFS metadata structures, so may not have covered all cases. We have not tested the procedure on any other system. The terminology used here probably isn't correct.
 
